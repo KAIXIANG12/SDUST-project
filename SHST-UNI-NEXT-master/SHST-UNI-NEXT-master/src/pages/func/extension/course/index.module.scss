@@ -1,0 +1,25 @@
+.classContainer {
+  color: #aaa;
+}
+
+.className {
+  color: #333;
+  font-size: 15px;
+}
+
+.classRoom {
+  color: rgb(var(--blue-6));
+  font-size: 18px;
+}
+
+.right {
+  align-items: center;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.loading {
+  background-color: var(--color-bg-2);
+  margin-bottom: 10px;
+  padding: 10px;
+}

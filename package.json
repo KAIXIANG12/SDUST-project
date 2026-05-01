@@ -1,0 +1,13 @@
+{
+  "name": "student-feedback-system",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start:backend": "mvn -f backend-spring/pom.xml spring-boot:run",
+    "start:frontend": "npm.cmd --prefix frontend run dev",
+    "dev:backend": "mvn -f backend-spring/pom.xml spring-boot:run",
+    "dev:frontend": "npm.cmd --prefix frontend run dev",
+    "build:frontend": "npm.cmd --prefix frontend run build"
+  }
+}

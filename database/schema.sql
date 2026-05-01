@@ -1,0 +1,176 @@
+CREATE DATABASE IF NOT EXISTS student_feedback_system
+  DEFAULT CHARACTER SET utf8mb4
+  DEFAULT COLLATE utf8mb4_unicode_ci;
+
+USE student_feedback_system;
+
+CREATE TABLE IF NOT EXISTS department (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  code VARCHAR(50) NOT NULL UNIQUE,
+  name VARCHAR(100) NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS major (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  department_id BIGINT NOT NULL,
+  code VARCHAR(50) NOT NULL,
+  name VARCHAR(100) NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS class_group (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  major_id BIGINT NOT NULL,
+  grade_year INT NOT NULL,
+  name VARCHAR(100) NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS role (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  role_key VARCHAR(50) NOT NULL UNIQUE,
+  role_name VARCHAR(100) NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS app_user (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  username VARCHAR(100) NOT NULL UNIQUE,
+  password_hash VARCHAR(255) NOT NULL,
+  real_name VARCHAR(100) NOT NULL,
+  user_type VARCHAR(30) NOT NULL,
+  department_id BIGINT,
+  class_group_id BIGINT,
+  phone VARCHAR(30),
+  status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS user_role (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  user_id BIGINT NOT NULL,
+  role_id BIGINT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS teacher (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  department_id BIGINT NOT NULL,
+  teacher_no VARCHAR(50) NOT NULL UNIQUE,
+  teacher_name VARCHAR(100) NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS term (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  academic_year VARCHAR(30) NOT NULL,
+  semester VARCHAR(30) NOT NULL,
+  start_date DATE,
+  end_date DATE,
+  status VARCHAR(20) NOT NULL DEFAULT 'PLANNED'
+);
+
+CREATE TABLE IF NOT EXISTS course (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  course_code VARCHAR(50) NOT NULL UNIQUE,
+  course_name VARCHAR(150) NOT NULL,
+  department_id BIGINT,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS teaching_task (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  term_id BIGINT NOT NULL,
+  course_id BIGINT NOT NULL,
+  teacher_id BIGINT,
+  class_group_id BIGINT NOT NULL,
+  planned_teacher_name VARCHAR(100),
+  actual_teacher_name VARCHAR(100),
+  week_range VARCHAR(100),
+  day_index INT,
+  section_index INT,
+  classroom VARCHAR(200),
+  guidance_mode VARCHAR(50),
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS weekly_feedback_task (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  term_id BIGINT NOT NULL,
+  week_no INT NOT NULL,
+  class_group_id BIGINT NOT NULL,
+  task_name VARCHAR(200) NOT NULL,
+  deadline DATETIME,
+  status VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS weekly_feedback (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  task_id BIGINT NOT NULL,
+  student_id BIGINT NOT NULL,
+  course_id BIGINT NOT NULL,
+  teacher_id BIGINT,
+  planned_teacher_name VARCHAR(100),
+  actual_teacher_name VARCHAR(100),
+  class_group_name VARCHAR(100),
+  week_range VARCHAR(100),
+  assignment_assessment VARCHAR(255),
+  guidance_mode VARCHAR(100),
+  learning_outcome TEXT,
+  content_arrangement_eval VARCHAR(100),
+  co_teacher_evaluation TEXT,
+  issue_suggestion TEXT,
+  hardware_issue TEXT,
+  remark TEXT,
+  need_reply TINYINT NOT NULL DEFAULT 0,
+  status VARCHAR(20) NOT NULL DEFAULT 'SUBMITTED',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS realtime_feedback (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  student_id BIGINT NOT NULL,
+  department_id BIGINT,
+  feedback_type VARCHAR(50) NOT NULL,
+  title VARCHAR(200) NOT NULL,
+  content TEXT NOT NULL,
+  location_text VARCHAR(200),
+  need_reply TINYINT NOT NULL DEFAULT 0,
+  urgency_level VARCHAR(20) NOT NULL DEFAULT 'MEDIUM',
+  status VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS feedback_reply (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  feedback_type VARCHAR(30) NOT NULL,
+  feedback_id BIGINT NOT NULL,
+  replier_user_id BIGINT NOT NULL,
+  reply_content TEXT NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS sensitive_term (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  term_text VARCHAR(100) NOT NULL UNIQUE,
+  category VARCHAR(50),
+  risk_level VARCHAR(20) NOT NULL DEFAULT 'MEDIUM'
+);
+
+CREATE TABLE IF NOT EXISTS feedback_flag (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  feedback_type VARCHAR(30) NOT NULL,
+  feedback_id BIGINT NOT NULL,
+  flag_type VARCHAR(50) NOT NULL,
+  flag_value VARCHAR(255),
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS ai_summary (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  target_type VARCHAR(30) NOT NULL,
+  target_id BIGINT NOT NULL,
+  summary_text TEXT NOT NULL,
+  model_name VARCHAR(100),
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
