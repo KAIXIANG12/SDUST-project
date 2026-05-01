@@ -117,6 +117,7 @@ public class FeedbackApiController {
       data.put("termStart", calendar.get("termStart"));
       data.put("dateRow", calendar.get("dateRow"));
       data.put("academicSessionId", academicSession.getAcademicSessionId());
+      data.put("source", "academic");
       try {
         QzAcademicClient.SyncResult timetable = academicClient.readPersonalTimetableFromSession(body, academicSession.getAcademicSessionId());
         data.put("termCode", timetable.getTermCode());
@@ -146,6 +147,7 @@ public class FeedbackApiController {
         data.put("dateRow", calendar.get("dateRow"));
         data.put("rawCount", 0);
         data.put("timetable", java.util.Collections.emptyList());
+        data.put("source", "academic");
         data.put("warning", error.getMessage());
         return ResponseEntity.ok(ApiResponse.ok(data));
       }

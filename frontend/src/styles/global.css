@@ -348,6 +348,10 @@ body {
   width: 100%;
 }
 
+.remember-password {
+  margin: -4px 0 16px;
+}
+
 .reply-history-card {
   margin: 4px 0 14px;
 }
@@ -363,6 +367,13 @@ body {
   grid-template-columns: 1fr 92px 72px;
   gap: 8px;
   align-items: center;
+}
+
+.captcha-status {
+  margin: 8px 0 0;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .captcha-image {

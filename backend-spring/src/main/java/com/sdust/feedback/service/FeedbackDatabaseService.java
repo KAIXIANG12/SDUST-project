@@ -149,6 +149,7 @@ public class FeedbackDatabaseService {
     result.put("dateRow", buildDateRow(termStart, weekNo));
     result.put("info", info);
     result.put("timetable", info);
+    result.put("source", "database");
     return result;
   }
 

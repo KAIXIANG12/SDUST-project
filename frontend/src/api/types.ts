@@ -76,6 +76,7 @@ export type AcademicLoginResponse = LoginResponse & {
   rawCount: number;
   academicSessionId?: string;
   warning?: string;
+  source?: string;
   timetable: PersonalTimetableItem[];
 };
 
@@ -86,6 +87,7 @@ export type MyTimetableResponse = {
   weekNo: number;
   today: string;
   dateRow: AcademicCalendarDay[];
+  source?: string;
   info: PersonalTimetableItem[];
   timetable: PersonalTimetableItem[];
 };

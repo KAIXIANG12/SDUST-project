@@ -42,12 +42,31 @@ const activeMasterResource = ref("departments");
 const importingSchedule = ref(false);
 const loadingAcademicCaptcha = ref(false);
 const queryingGrades = ref(false);
+const academicCaptchaStatus = ref("");
 const replyRecords = ref([]);
 const timetableDetailCourses = ref([]);
 const personalTimetableStorageKey = "student_feedback_personal_timetable";
 const personalTimetableMetaStorageKey = "student_feedback_personal_timetable_meta";
 const academicSessionStorageKey = "student_feedback_academic_session_id";
+const academicAccountStorageKey = "student_feedback_academic_account";
+const academicPasswordStorageKey = "student_feedback_academic_password";
+const academicRememberPasswordStorageKey = "student_feedback_academic_remember_password";
 const academicSessionId = ref(localStorage.getItem(academicSessionStorageKey) || "");
+const captchaWidth = 62;
+const captchaHeight = 22;
+const captchaThreshold = 150;
+const captchaCharMap: Record<string, string> = {
+  1: "111100111110000111110000111111100111111100111111100111111100111111100111111100111111100111110000001110000001",
+  2: "100000111000000011111111001111111001111111001111110011111000111110011111100111111001111111000000001000000001",
+  3: "100000111000000011111110001111111001111110011110000111110000011111110001111111001111110001100000011100000111",
+  b: "001111111001111111001111111001000011000000001000111000001111100001111100001111100000111000000000001001000011",
+  c: "111111111111111111111111111110000011100000011000111111001111111001111111001111111000111111100000011110000011",
+  m: "111111111111111111111111111001000011000000000000111000001111001001111001001111001001111001111001001111001001",
+  n: "111111111111111111111111111001100001001000000000011100000111100001111100001111100001111100001111100001111100",
+  v: "111111111111111111111111111111111011001110011001110011001110011100100111100100111100100111110001111110001111",
+  x: "111111111111111111111111111001110011001110011100100111110001111110001111110001111100100111001110011001110011",
+  z: "111111111111111111111111111000000011000000011111100111111001111110011111100111111001111111000000011000000011"
+};
 
 const state = reactive({
   health: null,
@@ -76,7 +95,8 @@ const state = reactive({
     weekNo: "",
     termStart: "",
     today: "",
-    dateRow: []
+    dateRow: [],
+    source: ""
   }
 });
 
@@ -100,6 +120,7 @@ const academicLoginForm = reactive({
   captchaSessionId: "",
   captchaImage: "",
   captchaCode: "",
+  rememberPassword: true
 });
 
 const gradeQueryForm = reactive({
@@ -250,7 +271,13 @@ const statCards = computed(() => [
 ]);
 
 const weekDays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
-const classSections = [0, 1, 2, 3, 4];
+const classSections = computed(() => {
+  const maxSerial = state.personalTimetable.reduce((max, item) => {
+    const serial = Number(item.serial);
+    return Number.isNaN(serial) ? max : Math.max(max, serial);
+  }, 4);
+  return Array.from({ length: maxSerial + 1 }, (_, index) => index);
+});
 
 const isStudentLike = computed(() =>
   ["STUDENT", "CLASS_REPRESENTATIVE"].includes(String(state.currentUser?.role || ""))
@@ -384,6 +411,10 @@ function courseIncludesWeek(course, weekNo) {
 function changeTimetableWeek(offset) {
   const next = Number(timetableView.weekNo || 1) + offset;
   timetableView.weekNo = Math.min(30, Math.max(1, next));
+  if (isAcademicTimetableSource()) {
+    updateTimetableWeekOnly(timetableView.weekNo);
+    return;
+  }
   loadMyTimetable(timetableView.weekNo);
 }
 
@@ -459,7 +490,10 @@ async function loadAllData() {
     state.masterData.teachers = teachers;
     state.masterData.courses = courses;
     state.masterData.terms = terms;
-    applyTimetableResult(myTimetable, { keepExistingWhenEmpty: state.personalTimetable.length > 0 });
+    applyTimetableResult(myTimetable, {
+      keepExistingWhenEmpty: state.personalTimetable.length > 0,
+      preserveAcademicSource: true
+    });
     if (!state.personalTimetableMeta.termCode) {
       state.personalTimetableMeta.termCode = academicCalendar.termCode;
       state.personalTimetableMeta.termStart = academicCalendar.termStart;
@@ -484,9 +518,13 @@ async function loadMyTimetable(week) {
   if (!isAuthenticated.value) {
     return;
   }
+  if (isAcademicTimetableSource()) {
+    updateTimetableWeekOnly(Number(week || timetableView.weekNo || 1));
+    return;
+  }
   try {
     const result = await apiClient.getMyTimetable(Number(week || timetableView.weekNo || 1));
-    applyTimetableResult(result, { keepExistingWhenEmpty: false });
+    applyTimetableResult(result, { keepExistingWhenEmpty: state.personalTimetable.length > 0 });
   } catch (error) {
     ElMessage.warning(error instanceof Error ? error.message : "课表加载失败");
   }
@@ -502,11 +540,20 @@ function applyTimetableResult(result, options = {}) {
     weekNo: String(result.weekNo || result.currentWeek || timetableView.weekNo || 1),
     termStart: result.termStart || state.personalTimetableMeta.termStart || "",
     today: result.today || state.personalTimetableMeta.today || "",
-    dateRow: result.dateRow || state.personalTimetableMeta.dateRow || []
+    dateRow: result.dateRow || state.personalTimetableMeta.dateRow || [],
+    source: result.source || (result.info ? "database" : state.personalTimetableMeta.source || "")
   };
   const shouldKeepExisting = options.keepExistingWhenEmpty && nextTimetable.length === 0;
-  if (!shouldKeepExisting) {
+  const shouldKeepAcademic =
+    options.preserveAcademicSource &&
+    state.personalTimetableMeta.source === "academic" &&
+    state.personalTimetable.length > 0 &&
+    nextMeta.source !== "academic";
+  if (!shouldKeepExisting && !shouldKeepAcademic) {
     state.personalTimetable = nextTimetable;
+  }
+  if (shouldKeepAcademic) {
+    nextMeta.source = state.personalTimetableMeta.source;
   }
   state.personalTimetableMeta = nextMeta;
   timetableView.weekNo = Number(nextMeta.weekNo || 1);
@@ -514,9 +561,23 @@ function applyTimetableResult(result, options = {}) {
   localStorage.setItem(personalTimetableMetaStorageKey, JSON.stringify(state.personalTimetableMeta));
 }
 
+function isAcademicTimetableSource() {
+  return Boolean(academicSessionId.value && state.personalTimetableMeta.source === "academic");
+}
+
+function updateTimetableWeekOnly(week) {
+  state.personalTimetableMeta = {
+    ...state.personalTimetableMeta,
+    weekNo: String(week || 1)
+  };
+  timetableView.weekNo = Number(state.personalTimetableMeta.weekNo || 1);
+  localStorage.setItem(personalTimetableMetaStorageKey, JSON.stringify(state.personalTimetableMeta));
+}
+
 async function initializeAuth() {
   const token = getStoredToken();
   restorePersonalTimetable();
+  restoreAcademicLoginCredentials();
 
   if (!token) {
     isAuthenticated.value = false;
@@ -548,19 +609,141 @@ function restorePersonalTimetable() {
     state.personalTimetable = timetable ? JSON.parse(timetable) : [];
     state.personalTimetableMeta = meta
       ? JSON.parse(meta)
-      : { termCode: "", weekNo: "", termStart: "", today: "", dateRow: [] };
+      : { termCode: "", weekNo: "", termStart: "", today: "", dateRow: [], source: "" };
+    state.personalTimetableMeta.source = state.personalTimetableMeta.source || "";
     timetableView.weekNo = Number(state.personalTimetableMeta.weekNo || 1);
   } catch {
     state.personalTimetable = [];
-    state.personalTimetableMeta = { termCode: "", weekNo: "", termStart: "", today: "", dateRow: [] };
+    state.personalTimetableMeta = { termCode: "", weekNo: "", termStart: "", today: "", dateRow: [], source: "" };
   }
 }
 
 function savePersonalTimetable(timetable, meta) {
   state.personalTimetable = timetable || [];
-  state.personalTimetableMeta = meta || { termCode: "", weekNo: "", termStart: "", today: "", dateRow: [] };
+  state.personalTimetableMeta = meta || { termCode: "", weekNo: "", termStart: "", today: "", dateRow: [], source: "" };
   localStorage.setItem(personalTimetableStorageKey, JSON.stringify(state.personalTimetable));
   localStorage.setItem(personalTimetableMetaStorageKey, JSON.stringify(state.personalTimetableMeta));
+}
+
+function restoreAcademicLoginCredentials() {
+  academicLoginForm.account = localStorage.getItem(academicAccountStorageKey) || "";
+  academicLoginForm.rememberPassword = localStorage.getItem(academicRememberPasswordStorageKey) !== "false";
+  academicLoginForm.password = academicLoginForm.rememberPassword
+    ? localStorage.getItem(academicPasswordStorageKey) || ""
+    : "";
+}
+
+function saveAcademicLoginCredentials() {
+  const account = academicLoginForm.account.trim();
+  if (account) {
+    localStorage.setItem(academicAccountStorageKey, account);
+  }
+  localStorage.setItem(academicRememberPasswordStorageKey, String(academicLoginForm.rememberPassword));
+  if (academicLoginForm.rememberPassword) {
+    localStorage.setItem(academicPasswordStorageKey, academicLoginForm.password);
+  } else {
+    localStorage.removeItem(academicPasswordStorageKey);
+  }
+}
+
+function compareCaptchaText(source: string, target: string) {
+  let matched = 0;
+  for (let index = 0; index < source.length; index += 1) {
+    if (source[index] === target[index]) {
+      matched += 1;
+    }
+  }
+  return matched;
+}
+
+function captchaMatrixToString(matrix: number[][]) {
+  return matrix.map((row) => row.join("")).join("");
+}
+
+function removeCaptchaNoiseLine(matrix: number[][]) {
+  for (let y = 1; y < captchaHeight - 1; y += 1) {
+    for (let x = 1; x < captchaWidth - 1; x += 1) {
+      if (matrix[y][x] === 0) {
+        const whiteNeighbors = matrix[y][x - 1] + matrix[y][x + 1] + matrix[y - 1][x] + matrix[y + 1][x];
+        if (whiteNeighbors > 2) {
+          matrix[y][x] = 1;
+        }
+      }
+    }
+  }
+  return matrix;
+}
+
+function cutCaptchaNodes(matrix: number[][]) {
+  const xCuts = [[4, 13], [14, 23], [24, 33], [34, 43]];
+  const yCuts = [[4, 16], [4, 16], [4, 16], [4, 16]];
+  return xCuts.map((xCut, index) => {
+    const node: number[][] = [];
+    const yCut = yCuts[index];
+    for (let y = yCut[0]; y < yCut[1]; y += 1) {
+      const row: number[] = [];
+      for (let x = xCut[0]; x < xCut[1]; x += 1) {
+        row.push(matrix[y][x]);
+      }
+      node.push(row);
+    }
+    return node;
+  });
+}
+
+function matchCaptchaCode(nodes: number[][][]) {
+  return nodes.map((node) => {
+    const nodeText = captchaMatrixToString(node);
+    let bestChar = "";
+    let bestScore = -1;
+    Object.entries(captchaCharMap).forEach(([char, template]) => {
+      const score = compareCaptchaText(nodeText, template);
+      if (score > bestScore) {
+        bestChar = char;
+        bestScore = score;
+      }
+    });
+    return bestChar;
+  }).join("");
+}
+
+function identifyAcademicCaptcha(imageBase64: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = captchaWidth;
+      canvas.height = captchaHeight;
+      const context = canvas.getContext("2d");
+      if (!context) {
+        reject(new Error("浏览器无法创建验证码识别画布"));
+        return;
+      }
+      context.drawImage(image, 0, 0, captchaWidth, captchaHeight);
+      const imageData = context.getImageData(0, 0, captchaWidth, captchaHeight).data;
+      const matrix: number[][] = [];
+      for (let y = 0; y < captchaHeight; y += 1) {
+        matrix[y] = [];
+        for (let x = 0; x < captchaWidth; x += 1) {
+          if (x === 0 || y === 0 || x === captchaWidth - 1 || y === captchaHeight - 1) {
+            matrix[y][x] = 1;
+            continue;
+          }
+          const offset = (y * captchaWidth + x) * 4;
+          matrix[y][x] =
+            imageData[offset] < captchaThreshold &&
+            imageData[offset + 1] < captchaThreshold &&
+            imageData[offset + 2] < captchaThreshold
+              ? 0
+              : 1;
+        }
+      }
+      const result = matchCaptchaCode(cutCaptchaNodes(removeCaptchaNoiseLine(matrix)));
+      resolve(result);
+    };
+    image.onerror = () => reject(new Error("验证码图片加载失败"));
+    image.src = imageBase64;
+  });
 }
 
 async function login() {
@@ -586,12 +769,21 @@ async function login() {
 
 async function refreshLoginCaptcha() {
   loadingAcademicCaptcha.value = true;
+  academicCaptchaStatus.value = "正在刷新验证码";
   try {
     const result = await apiClient.getAcademicCaptcha();
     academicLoginForm.captchaSessionId = result.captchaSessionId;
     academicLoginForm.captchaImage = result.imageBase64;
-    academicLoginForm.captchaCode = "";
+    try {
+      const captchaCode = await identifyAcademicCaptcha(result.imageBase64);
+      academicLoginForm.captchaCode = captchaCode;
+      academicCaptchaStatus.value = captchaCode ? `已自动识别：${captchaCode}` : "自动识别失败，请手动输入";
+    } catch {
+      academicLoginForm.captchaCode = "";
+      academicCaptchaStatus.value = "自动识别失败，请手动输入";
+    }
   } catch (error) {
+    academicCaptchaStatus.value = "";
     ElMessage.error(error instanceof Error ? error.message : "验证码获取失败");
   } finally {
     loadingAcademicCaptcha.value = false;
@@ -608,6 +800,7 @@ async function queryMyGrades() {
   try {
     const result = await apiClient.queryGrades({
       academicSessionId: academicSessionId.value,
+      password: academicLoginForm.password || localStorage.getItem(academicPasswordStorageKey) || "",
       termCode: gradeQueryForm.termCode.trim()
     });
     state.gradeRecords = result.grades || [];
@@ -652,7 +845,9 @@ function returnToAcademicLogin() {
   activeMenu.value = "dashboard";
   state.currentUser = null;
   academicLoginForm.account = username;
-  academicLoginForm.password = "";
+  academicLoginForm.password = academicLoginForm.rememberPassword
+    ? localStorage.getItem(academicPasswordStorageKey) || academicLoginForm.password
+    : "";
   academicLoginForm.captchaCode = "";
   refreshLoginCaptcha();
 }
@@ -676,6 +871,7 @@ async function academicLogin() {
       captchaSessionId: academicLoginForm.captchaSessionId,
       captchaCode: academicLoginForm.captchaCode.trim()
     });
+    saveAcademicLoginCredentials();
     setStoredToken(result.token);
     saveAcademicSession(result.academicSessionId || "");
     state.currentUser = result.user;
@@ -684,13 +880,20 @@ async function academicLogin() {
       weekNo: result.weekNo,
       termStart: result.termStart || "",
       today: "",
-      dateRow: result.dateRow || []
+      dateRow: result.dateRow || [],
+      source: result.timetable?.length ? "academic" : ""
     });
     timetableView.weekNo = Number(result.weekNo || 1);
     isAuthenticated.value = true;
     activeMenu.value = "dashboard";
-    academicLoginForm.password = "";
-    ElMessage.success(result.warning ? "学校账号登录成功，课表稍后再同步" : `学校账号登录成功，已读取 ${result.rawCount} 条课表`);
+    if (!academicLoginForm.rememberPassword) {
+      academicLoginForm.password = "";
+    }
+    if (result.warning) {
+      ElMessage.warning(result.warning);
+    } else {
+      ElMessage.success(`学校账号登录成功，已读取 ${result.rawCount} 条课表`);
+    }
     await loadAllData();
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "学校账号登录失败");
@@ -705,7 +908,7 @@ function logout() {
   clearAcademicSession();
   isAuthenticated.value = false;
   state.currentUser = null;
-  savePersonalTimetable([], { termCode: "", weekNo: "", termStart: "", today: "", dateRow: [] });
+  savePersonalTimetable([], { termCode: "", weekNo: "", termStart: "", today: "", dateRow: [], source: "" });
   ElMessage.success("已退出登录");
 }
 
@@ -1109,9 +1312,12 @@ onMounted(initializeAuth);
                 type="password"
                 show-password
                 :prefix-icon="Lock"
-                placeholder="仅用于本次教务认证，不保存"
+                placeholder="用于本次教务认证，可选择记住"
               />
             </el-form-item>
+            <el-checkbox v-model="academicLoginForm.rememberPassword" class="remember-password">
+              记住教务密码，仅保存在本机浏览器
+            </el-checkbox>
             <el-form-item label="验证码">
               <div class="captcha-row">
                 <el-input v-model="academicLoginForm.captchaCode" placeholder="验证码" />
@@ -1126,6 +1332,9 @@ onMounted(initializeAuth);
                   刷新
                 </el-button>
               </div>
+              <p v-if="academicCaptchaStatus" class="captcha-status">
+                {{ academicCaptchaStatus }}
+              </p>
             </el-form-item>
             <el-button type="primary" class="full-width" size="large" @click="academicLogin">
               学校账号登录并查看课表
@@ -1283,6 +1492,9 @@ onMounted(initializeAuth);
                   <el-button size="small" @click="changeTimetableWeek(-1)">上一周</el-button>
                   <el-tag>
                     {{ state.personalTimetableMeta.termCode || "当前学期" }} 第{{ timetableView.weekNo || "-" }}周
+                  </el-tag>
+                  <el-tag v-if="state.personalTimetableMeta.source === 'academic'" type="success">
+                    学校课表
                   </el-tag>
                   <el-button size="small" @click="changeTimetableWeek(1)">下一周</el-button>
                 </div>
@@ -1915,6 +2127,16 @@ onMounted(initializeAuth);
           <p>教室：{{ course.classroom || "教室待确认" }}</p>
           <p>教师：{{ course.teacherName || "教师待确认" }}</p>
           <p>周次：{{ course.weeksRaw || course.weekRange || "当前周" }}</p>
+          <p>位置：周{{ Number(course.day) + 1 }}，{{ sectionLabel(Number(course.serial || 0)) }}</p>
+          <p v-if="!course.teacherName">
+            原始教师字段：{{ course.raw?.teacher || course.raw?.jsxm || course.raw?.skjs || course.raw?.rkjs || "空" }}
+          </p>
+          <p v-if="!course.teacherName">
+            原始分行：{{ (course.raw?.debugLines || []).join(" | ") || "空" }}
+          </p>
+          <p v-if="!course.teacherName">
+            Title字段：{{ (course.raw?.debugTitles || []).join(" | ") || "空" }}
+          </p>
         </article>
       </section>
     </el-dialog>
