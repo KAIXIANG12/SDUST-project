@@ -12,13 +12,12 @@ import {
   OfficeBuilding,
   Refresh,
   Search,
-  Setting,
   Upload,
   UserFilled,
   WarningFilled
 } from "@element-plus/icons-vue";
 import { computed, onMounted, reactive, ref } from "vue";
-import { ElMessage } from "element-plus";
+import { ElMessage, ElMessageBox } from "element-plus";
 import ExcelJS from "exceljs";
 import {
   apiClient,
@@ -34,15 +33,19 @@ const authChecking = ref(true);
 const isAuthenticated = ref(false);
 const submitDrawerVisible = ref(false);
 const masterDataDrawerVisible = ref(false);
+const userAuthorizationDrawerVisible = ref(false);
 const taskGenerateDrawerVisible = ref(false);
 const weeklyFeedbackDrawerVisible = ref(false);
 const replyDrawerVisible = ref(false);
 const timetableDetailVisible = ref(false);
 const activeMasterResource = ref("departments");
 const importingSchedule = ref(false);
+const generatingAiSummary = ref(false);
 const loadingAcademicCaptcha = ref(false);
 const queryingGrades = ref(false);
+const diagnosingAcademic = ref(false);
 const academicCaptchaStatus = ref("");
+const academicDebugReport = ref("");
 const replyRecords = ref([]);
 const timetableDetailCourses = ref([]);
 const personalTimetableStorageKey = "student_feedback_personal_timetable";
@@ -83,8 +86,15 @@ const state = reactive({
     terms: []
   },
   weeklyTasks: [],
+  weeklyTaskItems: [],
   weeklyTaskCompliance: [],
   weeklyFeedbacks: [],
+  weeklyAnalytics: {
+    byClass: [],
+    byCourse: [],
+    byTeacher: []
+  },
+  weeklySummaries: [],
   realtimeFeedbacks: [],
   feedbackFlags: [],
   personalTimetable: [],
@@ -101,6 +111,7 @@ const state = reactive({
 });
 
 const realtimeForm = reactive({
+  id: null,
   type: "HARDWARE",
   urgencyLevel: "MEDIUM",
   title: "",
@@ -133,11 +144,21 @@ const timetableView = reactive({
 
 const masterDataForm = reactive({});
 
+const userAuthorizationForm = reactive({
+  userId: null,
+  username: "",
+  realName: "",
+  role: "STUDENT",
+  departmentId: null,
+  classGroupId: null,
+  status: "ACTIVE"
+});
+
 const taskGenerateForm = reactive({
   termId: 1,
   weekNo: 13,
   deadline: "",
-  classGroupIdsText: ""
+  classGroupIds: []
 });
 
 const weeklyFeedbackForm = reactive({
@@ -171,8 +192,7 @@ const menuItems = [
   { key: "baseData", label: "基础数据", icon: OfficeBuilding },
   { key: "schedule", label: "课表任务", icon: Calendar },
   { key: "feedback", label: "反馈中心", icon: DocumentChecked },
-  { key: "analytics", label: "统计分析", icon: DataAnalysis },
-  { key: "governance", label: "落地治理", icon: Setting }
+  { key: "analytics", label: "统计分析", icon: DataAnalysis }
 ];
 
 const masterDataTabs = [
@@ -283,6 +303,131 @@ const isStudentLike = computed(() =>
   ["STUDENT", "CLASS_REPRESENTATIVE"].includes(String(state.currentUser?.role || ""))
 );
 
+const currentRole = computed(() => String(state.currentUser?.role || ""));
+
+const isPlainStudent = computed(() => currentRole.value === "STUDENT");
+
+const isClassRepresentative = computed(() => currentRole.value === "CLASS_REPRESENTATIVE");
+
+const canManageFeedback = computed(() =>
+  ["SUPER_ADMIN", "DEPARTMENT_ADMIN"].includes(currentRole.value)
+);
+
+const canSubmitWeeklyFeedback = computed(() => isStudentLike.value);
+
+const selectedAuthorizationClass = computed(() =>
+  state.masterData.classes.find((item) => Number(item.id) === Number(userAuthorizationForm.classGroupId))
+);
+
+const selectedAuthorizationDepartment = computed(() =>
+  state.masterData.departments.find((item) => Number(item.id) === Number(userAuthorizationForm.departmentId))
+);
+
+const linkedAuthorizationDepartment = computed(() => {
+  const departmentId = classDepartmentId(userAuthorizationForm.classGroupId);
+  return state.masterData.departments.find((item) => Number(item.id) === Number(departmentId));
+});
+
+const realtimeFeedbackWordCount = computed(() =>
+  countTextLength([realtimeForm.title, realtimeForm.locationText, realtimeForm.content])
+);
+
+const weeklyFeedbackWordCount = computed(() =>
+  countTextLength([
+    weeklyFeedbackForm.learningOutcome,
+    weeklyFeedbackForm.issueSuggestion,
+    weeklyFeedbackForm.hardwareIssue,
+    weeklyFeedbackForm.remark
+  ])
+);
+
+const personalTimetableFeedbackItems = computed(() =>
+  filteredPersonalTimetable.value.map((course, index) => {
+    const normalized = normalizeTimetableCourse(course);
+    return {
+      taskId: "personal-current",
+      termId: state.personalTimetableMeta.termCode || "",
+      weekNo: Number(timetableView.weekNo || state.personalTimetableMeta.weekNo || 1),
+      classGroupId: state.currentUser?.classGroupId || null,
+      className: course.className || state.currentUser?.className || "本人课表",
+      deadline: "",
+      teachingTaskId: course.id || null,
+      courseId: `personal-${index}`,
+      courseName: normalized.courseName,
+      teacherId: null,
+      teacherName: normalized.teacherName,
+      plannedTeacherName: normalized.teacherName,
+      actualTeacherName: normalized.teacherName,
+      teacherDepartmentName: course.departmentName || "",
+      weekRange: normalized.weeksRaw || String(timetableView.weekNo || ""),
+      guidanceMode: course.guidanceMode || "",
+      classroom: normalized.classroom,
+      day: course.day,
+      serial: course.serial,
+      sectionText: course.sectionText || "",
+      feedbackId: null,
+      itemStatus: "PENDING",
+      qualityStatus: "OPTIONAL",
+      qualityRemark: "来自本人当前课表，可自愿反馈",
+      personalTimetableFallback: true
+    };
+  })
+);
+
+const courseFeedbackItems = computed(() =>
+  state.weeklyTaskItems.length > 0 ? state.weeklyTaskItems : personalTimetableFeedbackItems.value
+);
+
+const weeklyFeedbackTaskOptions = computed(() => {
+  const record = new Map();
+  courseFeedbackItems.value.forEach((item) => {
+    if (!record.has(item.taskId)) {
+      record.set(item.taskId, {
+        id: item.taskId,
+        label: item.personalTimetableFallback
+          ? `第${item.weekNo}周 / 我的当前课表`
+          : `第${item.weekNo}周 / ${item.className}`
+      });
+    }
+  });
+  return Array.from(record.values());
+});
+
+const selectedWeeklyTaskItems = computed(() =>
+  courseFeedbackItems.value.filter((item) => item.taskId === weeklyFeedbackForm.taskId)
+);
+
+const weeklyFeedbackCourseOptions = computed(() =>
+  selectedWeeklyTaskItems.value.map((item) => ({
+    ...item,
+    label: `${item.courseName} / ${item.teacherName || item.actualTeacherName || item.plannedTeacherName || "待确认教师"}${item.classroom ? ` / ${item.classroom}` : ""}`
+  }))
+);
+
+const visibleMenuItems = computed(() => {
+  if (canManageFeedback.value) {
+    return menuItems;
+  }
+  if (isClassRepresentative.value) {
+    return menuItems.filter((item) => ["dashboard", "schedule", "feedback"].includes(item.key));
+  }
+  return menuItems.filter((item) => ["dashboard", "feedback"].includes(item.key));
+});
+
+function isMenuVisible(key) {
+  return visibleMenuItems.value.some((item) => item.key === key);
+}
+
+function selectMenu(key) {
+  activeMenu.value = isMenuVisible(key) ? key : "dashboard";
+}
+
+function ensureActiveMenuAllowed() {
+  if (!isMenuVisible(activeMenu.value)) {
+    activeMenu.value = "dashboard";
+  }
+}
+
 const currentDayIndex = computed(() => {
   const day = new Date().getDay();
   return day === 0 ? 6 : day - 1;
@@ -356,7 +501,12 @@ function normalizeTimetableCourse(course) {
     ...course,
     courseName,
     teacherName: course.teacherName || course.teacher || "",
+    teacherMissingReason: course.teacherMissingReason || course.raw?.teacherMissingReason || "",
+    teacherRootCause: course.teacherRootCause || course.raw?.teacherRootCause || "",
+    teacherSource: course.teacherSource || course.raw?.teacherSource || "",
+    teacherExtensionDebug: course.teacherExtensionDebug || course.raw?.teacherExtensionDebug || null,
     classroom: course.classroom || course.locationText || "",
+    sectionText: course.sectionText || course.raw?.sectionText || "",
     weeksRaw: course.weeksRaw || course.weekRange || "",
     isCurWeek,
     background: isCurWeek ? courseColor(courseName) : "#aab4c0"
@@ -424,7 +574,7 @@ function openTimetableDetail(cell) {
 }
 
 const pageTitle = computed(() => {
-  const matched = menuItems.find((item) => item.key === activeMenu.value);
+  const matched = visibleMenuItems.value.find((item) => item.key === activeMenu.value);
   return matched?.label || "学生反馈系统";
 });
 
@@ -432,68 +582,32 @@ const highPriorityFeedbacks = computed(() =>
   state.realtimeFeedbacks.filter((item) => item.urgencyLevel === "HIGH")
 );
 
-const canManageFeedback = computed(() =>
-  ["SUPER_ADMIN", "DEPARTMENT_ADMIN"].includes(state.currentUser?.role || "")
-);
-
 async function loadAllData() {
   loading.value = true;
   try {
-    const [
-      health,
-      modules,
-      currentUser,
-      summary,
-      users,
-      departments,
-      majors,
-      classes,
-      teachers,
-      courses,
-      terms,
-      academicCalendar,
-      myTimetable,
-      weeklyTasks,
-      weeklyTaskCompliance,
-      weeklyFeedbacks,
-      realtimeFeedbacks,
-      feedbackFlags
-    ] = await Promise.all([
+    const [health, currentUser, summary, academicCalendar] = await Promise.all([
       apiClient.getHealth(),
-      apiClient.getModules(),
       apiClient.getCurrentUser(),
       apiClient.getDashboardSummary(),
-      apiClient.getUsers(),
-      apiClient.getMasterData("departments"),
-      apiClient.getMasterData("majors"),
-      apiClient.getMasterData("classes"),
-      apiClient.getMasterData("teachers"),
-      apiClient.getMasterData("courses"),
-      apiClient.getMasterData("terms"),
-      apiClient.getAcademicCalendar(),
-      apiClient.getMyTimetable(Number(timetableView.weekNo || 0) || undefined),
-      apiClient.getWeeklyTasks(),
-      apiClient.getWeeklyTaskCompliance(),
-      apiClient.getWeeklyFeedbacks(),
-      apiClient.getRealtimeFeedbacks(),
-      apiClient.getFeedbackFlags()
+      apiClient.getAcademicCalendar()
     ]);
+    const role = String(currentUser?.role || "");
+    const isAdminRole = ["SUPER_ADMIN", "DEPARTMENT_ADMIN"].includes(role);
+    const isMonitorRole = role === "CLASS_REPRESENTATIVE";
+    const shouldLoadDatabaseTimetable = ["STUDENT", "CLASS_REPRESENTATIVE"].includes(role) && !isAcademicTimetableSource();
 
     state.health = health;
-    state.modules = modules;
     state.currentUser = currentUser;
+    ensureActiveMenuAllowed();
     state.summary = summary;
-    state.users = users;
-    state.masterData.departments = departments;
-    state.masterData.majors = majors;
-    state.masterData.classes = classes;
-    state.masterData.teachers = teachers;
-    state.masterData.courses = courses;
-    state.masterData.terms = terms;
-    applyTimetableResult(myTimetable, {
-      keepExistingWhenEmpty: state.personalTimetable.length > 0,
-      preserveAcademicSource: true
-    });
+
+    if (shouldLoadDatabaseTimetable) {
+      const myTimetable = await apiClient.getMyTimetable(Number(timetableView.weekNo || 0) || undefined);
+      applyTimetableResult(myTimetable, {
+        keepExistingWhenEmpty: state.personalTimetable.length > 0,
+        preserveAcademicSource: true
+      });
+    }
     if (!state.personalTimetableMeta.termCode) {
       state.personalTimetableMeta.termCode = academicCalendar.termCode;
       state.personalTimetableMeta.termStart = academicCalendar.termStart;
@@ -502,11 +616,69 @@ async function loadAllData() {
       state.personalTimetableMeta.weekNo = String(academicCalendar.currentWeek);
       timetableView.weekNo = academicCalendar.currentWeek;
     }
+
+    const [
+      weeklyTasks,
+      weeklyTaskItems,
+      weeklyFeedbacks,
+      realtimeFeedbacks
+    ] = await Promise.all([
+      apiClient.getWeeklyTasks(),
+      apiClient.getWeeklyTaskItems(),
+      apiClient.getWeeklyFeedbacks(),
+      apiClient.getRealtimeFeedbacks()
+    ]);
     state.weeklyTasks = weeklyTasks;
-    state.weeklyTaskCompliance = weeklyTaskCompliance;
+    state.weeklyTaskItems = weeklyTaskItems;
     state.weeklyFeedbacks = weeklyFeedbacks;
     state.realtimeFeedbacks = realtimeFeedbacks;
-    state.feedbackFlags = feedbackFlags;
+
+    if (isMonitorRole || isAdminRole) {
+      state.weeklyTaskCompliance = await apiClient.getWeeklyTaskCompliance();
+    } else {
+      state.weeklyTaskCompliance = [];
+    }
+
+    if (isAdminRole) {
+      const [
+        users,
+        departments,
+        majors,
+        classes,
+        teachers,
+        courses,
+        terms,
+        weeklyAnalytics,
+        weeklySummaries,
+        feedbackFlags
+      ] = await Promise.all([
+        apiClient.getUsers(),
+        apiClient.getMasterData("departments"),
+        apiClient.getMasterData("majors"),
+        apiClient.getMasterData("classes"),
+        apiClient.getMasterData("teachers"),
+        apiClient.getMasterData("courses"),
+        apiClient.getMasterData("terms"),
+        apiClient.getWeeklyFeedbackAnalytics().catch(() => ({ byClass: [], byCourse: [], byTeacher: [] })),
+        apiClient.getWeeklyFeedbackSummaries().catch(() => []),
+        apiClient.getFeedbackFlags()
+      ]);
+      state.users = users;
+      state.masterData.departments = departments;
+      state.masterData.majors = majors;
+      state.masterData.classes = classes;
+      state.masterData.teachers = teachers;
+      state.masterData.courses = courses;
+      state.masterData.terms = terms;
+      state.weeklyAnalytics = weeklyAnalytics;
+      state.weeklySummaries = weeklySummaries;
+      state.feedbackFlags = feedbackFlags;
+    } else {
+      state.users = [];
+      state.weeklyAnalytics = { byClass: [], byCourse: [], byTeacher: [] };
+      state.weeklySummaries = [];
+      state.feedbackFlags = [];
+    }
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "系统数据加载失败");
   } finally {
@@ -519,7 +691,7 @@ async function loadMyTimetable(week) {
     return;
   }
   if (isAcademicTimetableSource()) {
-    updateTimetableWeekOnly(Number(week || timetableView.weekNo || 1));
+    await loadAcademicTimetable(week);
     return;
   }
   try {
@@ -527,6 +699,25 @@ async function loadMyTimetable(week) {
     applyTimetableResult(result, { keepExistingWhenEmpty: state.personalTimetable.length > 0 });
   } catch (error) {
     ElMessage.warning(error instanceof Error ? error.message : "课表加载失败");
+  }
+}
+
+async function loadAcademicTimetable(week) {
+  if (!academicSessionId.value) {
+    return;
+  }
+  const targetWeek = Number(week || timetableView.weekNo || state.personalTimetableMeta.weekNo || 1);
+  updateTimetableWeekOnly(targetWeek);
+  try {
+    const result = await apiClient.queryAcademicTimetable({
+      academicSessionId: academicSessionId.value,
+      termCode: state.personalTimetableMeta.termCode || "",
+      weekNo: targetWeek,
+      enrichTeachers: "false"
+    });
+    applyTimetableResult(result, { keepExistingWhenEmpty: true });
+  } catch (error) {
+    ElMessage.warning(error instanceof Error ? error.message : "教务课表加载失败");
   }
 }
 
@@ -642,6 +833,26 @@ function saveAcademicLoginCredentials() {
   if (academicLoginForm.rememberPassword) {
     localStorage.setItem(academicPasswordStorageKey, academicLoginForm.password);
   } else {
+    localStorage.removeItem(academicPasswordStorageKey);
+  }
+}
+
+function persistAcademicLoginDraft() {
+  localStorage.setItem(academicRememberPasswordStorageKey, String(academicLoginForm.rememberPassword));
+  const account = academicLoginForm.account.trim();
+  if (account) {
+    localStorage.setItem(academicAccountStorageKey, account);
+  }
+  if (academicLoginForm.rememberPassword) {
+    localStorage.setItem(academicPasswordStorageKey, academicLoginForm.password);
+  }
+}
+
+function handleRememberPasswordChange() {
+  if (academicLoginForm.rememberPassword) {
+    persistAcademicLoginDraft();
+  } else {
+    localStorage.setItem(academicRememberPasswordStorageKey, "false");
     localStorage.removeItem(academicPasswordStorageKey);
   }
 }
@@ -823,6 +1034,30 @@ async function queryMyGrades() {
   }
 }
 
+async function diagnoseAcademicInterfaces() {
+  if (!academicSessionId.value) {
+    ElMessage.warning("教务登录会话已失效，请重新进行学校账号认证");
+    returnToAcademicLogin();
+    return;
+  }
+  diagnosingAcademic.value = true;
+  academicDebugReport.value = "";
+  try {
+    const result = await apiClient.diagnoseAcademic({
+      academicSessionId: academicSessionId.value,
+      password: academicLoginForm.password || localStorage.getItem(academicPasswordStorageKey) || "",
+      termCode: gradeQueryForm.termCode.trim() || state.personalTimetableMeta.termCode || "",
+      weekNo: timetableView.weekNo || state.personalTimetableMeta.weekNo || ""
+    });
+    academicDebugReport.value = JSON.stringify(result, null, 2);
+    ElMessage.success("教务诊断完成");
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "教务诊断失败");
+  } finally {
+    diagnosingAcademic.value = false;
+  }
+}
+
 function saveAcademicSession(nextAcademicSessionId) {
   academicSessionId.value = nextAcademicSessionId || "";
   if (academicSessionId.value) {
@@ -875,13 +1110,13 @@ async function academicLogin() {
     setStoredToken(result.token);
     saveAcademicSession(result.academicSessionId || "");
     state.currentUser = result.user;
-    savePersonalTimetable(result.timetable, {
+    savePersonalTimetable(result.timetable || [], {
       termCode: result.termCode,
       weekNo: result.weekNo,
       termStart: result.termStart || "",
       today: "",
       dateRow: result.dateRow || [],
-      source: result.timetable?.length ? "academic" : ""
+      source: result.academicSessionId ? "academic" : ""
     });
     timetableView.weekNo = Number(result.weekNo || 1);
     isAuthenticated.value = true;
@@ -892,9 +1127,10 @@ async function academicLogin() {
     if (result.warning) {
       ElMessage.warning(result.warning);
     } else {
-      ElMessage.success(`学校账号登录成功，已读取 ${result.rawCount} 条课表`);
+      ElMessage.success("学校账号登录成功，正在读取课表");
     }
     await loadAllData();
+    loadAcademicTimetable(result.weekNo);
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "学校账号登录失败");
     refreshLoginCaptcha();
@@ -913,6 +1149,7 @@ function logout() {
 }
 
 function resetRealtimeForm() {
+  realtimeForm.id = null;
   realtimeForm.type = "HARDWARE";
   realtimeForm.urgencyLevel = "MEDIUM";
   realtimeForm.title = "";
@@ -928,14 +1165,51 @@ async function submitRealtimeFeedback() {
   }
 
   try {
-    await apiClient.createRealtimeFeedback({ ...realtimeForm });
-    ElMessage.success("实时反馈已提交，管理员待办已更新");
+    if (realtimeForm.id) {
+      await apiClient.updateRealtimeFeedback(Number(realtimeForm.id), { ...realtimeForm });
+      ElMessage.success("实时反馈已更新");
+    } else {
+      await apiClient.createRealtimeFeedback({ ...realtimeForm });
+      ElMessage.success("实时反馈已提交，管理员待办已更新");
+    }
     submitDrawerVisible.value = false;
     resetRealtimeForm();
     state.realtimeFeedbacks = await apiClient.getRealtimeFeedbacks();
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "提交失败");
   }
+}
+
+function openRealtimeEdit(row) {
+  realtimeForm.id = row.id;
+  realtimeForm.type = row.type || "HARDWARE";
+  realtimeForm.urgencyLevel = row.urgencyLevel || "MEDIUM";
+  realtimeForm.title = row.title || "";
+  realtimeForm.locationText = row.locationText || "";
+  realtimeForm.content = row.content || "";
+  realtimeForm.needReply = Boolean(row.needReply);
+  submitDrawerVisible.value = true;
+}
+
+async function deleteRealtimeFeedback(row) {
+  try {
+    await ElMessageBox.confirm("删除后不可恢复，确认删除这条实时反馈吗？", "删除确认", {
+      type: "warning",
+      confirmButtonText: "删除",
+      cancelButtonText: "取消"
+    });
+    await apiClient.deleteRealtimeFeedback(Number(row.id));
+    state.realtimeFeedbacks = await apiClient.getRealtimeFeedbacks();
+    ElMessage.success("实时反馈已删除");
+  } catch (error) {
+    if (error !== "cancel") {
+      ElMessage.error(error instanceof Error ? error.message : "删除失败");
+    }
+  }
+}
+
+function canEditOwnRealtime(row) {
+  return isStudentLike.value && !canManageFeedback.value && ["SUBMITTED", "PENDING_REPLY"].includes(String(row.status || ""));
 }
 
 function openMasterDataDrawer(resource) {
@@ -967,35 +1241,96 @@ async function submitMasterData() {
   }
 }
 
+function openUserAuthorization(row) {
+  userAuthorizationForm.userId = row.id;
+  userAuthorizationForm.username = row.username || "";
+  userAuthorizationForm.realName = row.realName || "";
+  userAuthorizationForm.role = row.role || "STUDENT";
+  userAuthorizationForm.departmentId = row.departmentId || null;
+  userAuthorizationForm.classGroupId = row.classGroupId || null;
+  userAuthorizationForm.status = row.status || "ACTIVE";
+  userAuthorizationDrawerVisible.value = true;
+}
+
+async function submitUserAuthorization() {
+  if (!userAuthorizationForm.userId) {
+    return;
+  }
+  try {
+    const updated = await apiClient.updateUserAuthorization(Number(userAuthorizationForm.userId), {
+      realName: userAuthorizationForm.realName,
+      role: userAuthorizationForm.role,
+      departmentId: userAuthorizationForm.departmentId,
+      classGroupId: userAuthorizationForm.classGroupId,
+      status: userAuthorizationForm.status
+    });
+    state.users = state.users.map((item) => (item.id === updated.id ? updated : item));
+    if (state.currentUser?.id === updated.id) {
+      state.currentUser = updated;
+    }
+    userAuthorizationDrawerVisible.value = false;
+    ElMessage.success("用户角色与班级已更新");
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "用户授权失败");
+  }
+}
+
+function classDepartmentId(classGroupId) {
+  const classGroup = state.masterData.classes.find((item) => Number(item.id) === Number(classGroupId));
+  const major = state.masterData.majors.find((item) => Number(item.id) === Number(classGroup?.majorId));
+  return major?.departmentId || null;
+}
+
+function syncDepartmentFromClass() {
+  const departmentId = classDepartmentId(userAuthorizationForm.classGroupId);
+  if (departmentId) {
+    userAuthorizationForm.departmentId = departmentId;
+  }
+}
+
+function countTextLength(values) {
+  return values
+    .map((value) => String(value || "").trim())
+    .join("")
+    .length;
+}
+
+function openTaskGenerateDrawer() {
+  if (!taskGenerateForm.weekNo || taskGenerateForm.weekNo === 13) {
+    taskGenerateForm.weekNo = Number(state.personalTimetableMeta.weekNo || timetableView.weekNo || 1);
+  }
+  taskGenerateDrawerVisible.value = true;
+}
+
 async function generateWeeklyTasks() {
   try {
-    const classGroupIds = taskGenerateForm.classGroupIdsText
-      .split(",")
-      .map((item) => item.trim())
-      .filter(Boolean)
-      .map(Number);
-
     await apiClient.generateWeeklyTasks({
       termId: Number(taskGenerateForm.termId),
       weekNo: Number(taskGenerateForm.weekNo),
       deadline: taskGenerateForm.deadline || null,
-      classGroupIds
+      classGroupIds: taskGenerateForm.classGroupIds.map(Number)
     });
 
     ElMessage.success("周反馈任务已生成");
     taskGenerateDrawerVisible.value = false;
     state.weeklyTasks = await apiClient.getWeeklyTasks();
+    state.weeklyTaskItems = await apiClient.getWeeklyTaskItems();
     state.weeklyTaskCompliance = await apiClient.getWeeklyTaskCompliance();
     state.summary = await apiClient.getDashboardSummary();
+    if (canManageFeedback.value) {
+      state.weeklyAnalytics = await apiClient.getWeeklyFeedbackAnalytics();
+      state.weeklySummaries = await apiClient.getWeeklyFeedbackSummaries();
+    }
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "任务生成失败");
   }
 }
 
 function resetWeeklyFeedbackForm() {
-  weeklyFeedbackForm.taskId = state.weeklyTasks[0]?.id || null;
-  weeklyFeedbackForm.courseId = state.masterData.courses[0]?.id || null;
-  weeklyFeedbackForm.teacherId = state.masterData.teachers[0]?.id || null;
+  const firstItem = courseFeedbackItems.value.find((item) => !item.feedbackId) || courseFeedbackItems.value[0] || null;
+  weeklyFeedbackForm.taskId = firstItem?.taskId || null;
+  weeklyFeedbackForm.courseId = firstItem?.courseId || null;
+  weeklyFeedbackForm.teacherId = firstItem?.teacherId || null;
   weeklyFeedbackForm.plannedTeacherName = "";
   weeklyFeedbackForm.actualTeacherName = "";
   weeklyFeedbackForm.classGroupName = "";
@@ -1009,15 +1344,92 @@ function resetWeeklyFeedbackForm() {
   weeklyFeedbackForm.hardwareIssue = "";
   weeklyFeedbackForm.remark = "";
   weeklyFeedbackForm.needReply = false;
+  if (firstItem) {
+    applyWeeklyFeedbackItem(firstItem);
+  }
+}
+
+function applyWeeklyFeedbackItem(item) {
+  weeklyFeedbackForm.taskId = item.taskId;
+  weeklyFeedbackForm.courseId = item.courseId;
+  weeklyFeedbackForm.teacherId = item.teacherId || null;
+  weeklyFeedbackForm.plannedTeacherName = item.plannedTeacherName || item.teacherName || "";
+  weeklyFeedbackForm.actualTeacherName = item.actualTeacherName || item.teacherName || "";
+  weeklyFeedbackForm.classGroupName = item.className || "";
+  weeklyFeedbackForm.weekRange = item.weekRange || String(item.weekNo || "");
+  weeklyFeedbackForm.guidanceMode = item.guidanceMode || "";
+}
+
+function openWeeklyFeedbackForItem(item) {
+  resetWeeklyFeedbackForm();
+  applyWeeklyFeedbackItem(item);
+  weeklyFeedbackDrawerVisible.value = true;
+}
+
+function syncWeeklyFeedbackTaskSelection() {
+  const firstItem = selectedWeeklyTaskItems.value[0] || null;
+  if (firstItem) {
+    applyWeeklyFeedbackItem(firstItem);
+  } else {
+    weeklyFeedbackForm.courseId = null;
+    weeklyFeedbackForm.teacherId = null;
+  }
+}
+
+function syncWeeklyFeedbackCourseSelection() {
+  const item = selectedWeeklyTaskItems.value.find((option) => option.courseId === weeklyFeedbackForm.courseId);
+  if (item) {
+    applyWeeklyFeedbackItem(item);
+  }
 }
 
 async function submitWeeklyFeedback() {
+  const selectedItem = selectedWeeklyTaskItems.value.find((item) => item.courseId === weeklyFeedbackForm.courseId);
+  if (!selectedItem) {
+    ElMessage.warning("只能选择当前周课表中存在的课程进行反馈");
+    return;
+  }
+  if (selectedItem.personalTimetableFallback) {
+    const detail = [
+      weeklyFeedbackForm.learningOutcome && `教学效果或收获：${weeklyFeedbackForm.learningOutcome}`,
+      weeklyFeedbackForm.contentArrangementEval && `教学内容安排：${weeklyFeedbackForm.contentArrangementEval}`,
+      weeklyFeedbackForm.coTeacherEvaluation && `共课教师评价：${weeklyFeedbackForm.coTeacherEvaluation}`,
+      weeklyFeedbackForm.issueSuggestion && `问题建议：${weeklyFeedbackForm.issueSuggestion}`,
+      weeklyFeedbackForm.hardwareIssue && `硬件问题：${weeklyFeedbackForm.hardwareIssue}`,
+      weeklyFeedbackForm.remark && `备注：${weeklyFeedbackForm.remark}`
+    ].filter(Boolean).join("\n");
+    try {
+      await apiClient.createRealtimeFeedback({
+        type: "TEACHING",
+        urgencyLevel: weeklyFeedbackForm.hardwareIssue ? "HIGH" : "MEDIUM",
+        title: `课程反馈：${selectedItem.courseName}`,
+        locationText: selectedItem.classroom || "",
+        content: detail || `对课程「${selectedItem.courseName}」提交课程反馈。`,
+        needReply: weeklyFeedbackForm.needReply
+      });
+      ElMessage.success("课程反馈已提交");
+      weeklyFeedbackDrawerVisible.value = false;
+      resetWeeklyFeedbackForm();
+      state.realtimeFeedbacks = await apiClient.getRealtimeFeedbacks();
+      state.summary = await apiClient.getDashboardSummary();
+    } catch (error) {
+      ElMessage.error(error instanceof Error ? error.message : "课程反馈提交失败");
+    }
+    return;
+  }
   try {
     await apiClient.createWeeklyFeedback({ ...weeklyFeedbackForm });
-    ElMessage.success("周反馈已提交");
+    ElMessage.success(isClassRepresentative.value ? "周反馈已提交" : "课程反馈已提交");
     weeklyFeedbackDrawerVisible.value = false;
     resetWeeklyFeedbackForm();
     state.weeklyFeedbacks = await apiClient.getWeeklyFeedbacks();
+    state.weeklyTaskItems = await apiClient.getWeeklyTaskItems();
+    state.weeklyTaskCompliance = await apiClient.getWeeklyTaskCompliance();
+    state.summary = await apiClient.getDashboardSummary();
+    if (canManageFeedback.value) {
+      state.weeklyAnalytics = await apiClient.getWeeklyFeedbackAnalytics();
+      state.weeklySummaries = await apiClient.getWeeklyFeedbackSummaries();
+    }
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "周反馈提交失败");
   }
@@ -1029,11 +1441,7 @@ async function exportWeeklyFeedbackTable() {
     return;
   }
 
-  const workbook = new ExcelJS.Workbook();
-  workbook.creator = "教学反馈管理系统";
-  workbook.created = new Date();
-  const worksheet = workbook.addWorksheet("学生层面反馈");
-  const headers = [
+  const studentHeaders = [
     "教师所在院系",
     "计划授课教师",
     "实际授课教师",
@@ -1047,8 +1455,81 @@ async function exportWeeklyFeedbackTable() {
     "硬件问题（一定写明楼层房间号，如主楼-103；东楼233，并附上详细要求或问题状况）",
     "备注"
   ];
+  const teacherHeaders = [
+    "教师所在院系",
+    "授课教师",
+    "上课班级",
+    "开课课程",
+    "上课周次",
+    "外教教学内容安排是否合理",
+    "辅导方式",
+    "共课教师对课程的教学评价",
+    "难点或存在的问题或建议",
+    "硬件问题（一定写明楼层房间号，如主楼-103；东楼233，并附上详细要求或问题状况）",
+    "备注"
+  ];
+  const studentWidths = [22.1, 36.8, 32.7, 26.8, 49.6, 17.1, 23, 18.4, 27.4, 30.6, 20.4, 8.8];
+  const teacherWidths = [22.1, 36.8, 26.8, 53.3, 18.6, 23, 18.4, 27.4, 30.6, 20.4, 8.8];
+  const weekValues = [...new Set(state.weeklyFeedbacks.map((item) => item.weekRange).filter(Boolean))];
+  const weekLabel = weekValues.length === 1 ? `第${weekValues[0]}周` : "周反馈";
+  const normalizeText = (value) => String(value || "").trim();
+  const uniqueJoin = (values) => [...new Set(values.map(normalizeText).filter(Boolean))].join("\n");
+  const hardwareNeedsHighlight = (value) => {
+    const text = normalizeText(value);
+    return Boolean(text && !["无", "暂无", "没有", "无问题"].includes(text));
+  };
+  const styleTemplateSheet = (worksheet, widths, hardwareColumnIndex) => {
+    worksheet.name = "Sheet2";
+    worksheet.views = [{ state: "frozen", ySplit: 1 }];
+    const lastColumn = String.fromCharCode(64 + widths.length);
+    worksheet.autoFilter = `A1:${lastColumn}1`;
+    worksheet.columns.forEach((column, index) => {
+      column.width = widths[index] || 12;
+    });
+    worksheet.eachRow((row) => {
+      row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
+        cell.border = {
+          top: { style: "thin" },
+          left: { style: "thin" },
+          bottom: { style: "thin" },
+          right: { style: "thin" }
+        };
+        if (row.number === 1) {
+          cell.font = { name: "仿宋", size: 12, bold: true };
+          cell.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
+        } else {
+          cell.font = { name: "宋体", size: 10 };
+          cell.alignment = { vertical: "middle", horizontal: "left", wrapText: true };
+          if (colNumber === hardwareColumnIndex && hardwareNeedsHighlight(cell.value)) {
+            cell.fill = {
+              type: "pattern",
+              pattern: "solid",
+              fgColor: { argb: "FFFFFF00" }
+            };
+          }
+        }
+      });
+    });
+  };
+  const downloadWorkbook = async (workbook, filename) => {
+    const buffer = await workbook.xlsx.writeBuffer();
+    const blob = new Blob([buffer], {
+      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
 
-  worksheet.addRow(headers);
+  const studentWorkbook = new ExcelJS.Workbook();
+  studentWorkbook.creator = "教学反馈管理系统";
+  studentWorkbook.created = new Date();
+  const worksheet = studentWorkbook.addWorksheet("Sheet2");
+
+  worksheet.addRow(studentHeaders);
   state.weeklyFeedbacks.forEach((item) => {
     worksheet.addRow([
       item.teacherDepartmentName || item.departmentName || "",
@@ -1065,49 +1546,65 @@ async function exportWeeklyFeedbackTable() {
       item.remark || ""
     ]);
   });
+  styleTemplateSheet(worksheet, studentWidths, 11);
 
-  worksheet.views = [{ state: "frozen", ySplit: 1 }];
-  worksheet.autoFilter = "A1:L1";
-  worksheet.columns.forEach((column, index) => {
-    const widths = [18, 24, 24, 24, 28, 10, 18, 16, 34, 34, 46, 20];
-    column.width = widths[index] || 18;
-  });
-  worksheet.getRow(1).height = 36;
-  worksheet.getRow(1).font = { bold: true, color: { argb: "FFFFFFFF" } };
-  worksheet.getRow(1).fill = {
-    type: "pattern",
-    pattern: "solid",
-    fgColor: { argb: "FF0B4A7A" }
-  };
-  worksheet.getRow(1).alignment = { vertical: "middle", horizontal: "center", wrapText: true };
-  worksheet.eachRow((row) => {
-    if (row.number > 1) {
-      row.height = 42;
+  const teacherWorkbook = new ExcelJS.Workbook();
+  teacherWorkbook.creator = "教学反馈管理系统";
+  teacherWorkbook.created = new Date();
+  const teacherSheet = teacherWorkbook.addWorksheet("Sheet2");
+  teacherSheet.addRow(teacherHeaders);
+  const teacherGroups = new Map();
+  state.weeklyFeedbacks.forEach((item) => {
+    const key = [
+      item.teacherDepartmentName || item.departmentName || "",
+      item.actualTeacherName || item.plannedTeacherName || "待确认教师",
+      item.className || "",
+      item.courseName || "",
+      item.weekRange || ""
+    ].join("||");
+    if (!teacherGroups.has(key)) {
+      teacherGroups.set(key, {
+        departmentName: item.teacherDepartmentName || item.departmentName || "",
+        teacherName: item.actualTeacherName || item.plannedTeacherName || "待确认教师",
+        className: item.className || "",
+        courseName: item.courseName || "",
+        weekRange: item.weekRange || "",
+        contentArrangement: [],
+        guidanceModes: [],
+        coTeacherEvaluations: [],
+        issues: [],
+        hardware: [],
+        remarks: []
+      });
     }
-    row.eachCell((cell) => {
-      cell.alignment = { vertical: "top", wrapText: true };
-      cell.border = {
-        top: { style: "thin" },
-        left: { style: "thin" },
-        bottom: { style: "thin" },
-        right: { style: "thin" }
-      };
-    });
+    const group = teacherGroups.get(key);
+    if (item.contentArrangementEval) group.contentArrangement.push(item.contentArrangementEval);
+    if (item.guidanceMode) group.guidanceModes.push(item.guidanceMode);
+    if (item.coTeacherEvaluation) group.coTeacherEvaluations.push(item.coTeacherEvaluation);
+    if (item.issueSuggestion) group.issues.push(item.issueSuggestion);
+    if (item.hardwareIssue) group.hardware.push(item.hardwareIssue);
+    if (item.remark) group.remarks.push(item.remark);
   });
+  teacherGroups.forEach((group) => {
+    teacherSheet.addRow([
+      group.departmentName,
+      group.teacherName,
+      group.className,
+      group.courseName,
+      group.weekRange,
+      uniqueJoin(group.contentArrangement),
+      uniqueJoin(group.guidanceModes),
+      uniqueJoin(group.coTeacherEvaluations),
+      uniqueJoin(group.issues),
+      uniqueJoin(group.hardware),
+      uniqueJoin(group.remarks)
+    ]);
+  });
+  styleTemplateSheet(teacherSheet, teacherWidths, 10);
 
-  const buffer = await workbook.xlsx.writeBuffer();
-  const blob = new Blob([buffer], {
-    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-  });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  const weekValues = [...new Set(state.weeklyFeedbacks.map((item) => item.weekRange).filter(Boolean))];
-  const weekLabel = weekValues.length === 1 ? `第${weekValues[0]}周` : "周反馈";
-  link.href = url;
-  link.download = `${weekLabel}外教课程反馈--学生层面.xlsx`;
-  link.click();
-  URL.revokeObjectURL(url);
-  ElMessage.success("已按老师表格模板导出");
+  await downloadWorkbook(studentWorkbook, `${weekLabel}外教课程反馈--学生层面.xlsx`);
+  await downloadWorkbook(teacherWorkbook, `${weekLabel}外教课程反馈--教师层面.xlsx`);
+  ElMessage.success("已按老师两个 demo 表模板导出");
 }
 
 async function openReplyDrawer(feedbackType, feedbackId, currentStatus = "IN_PROGRESS") {
@@ -1132,6 +1629,10 @@ async function submitReply() {
     state.realtimeFeedbacks = await apiClient.getRealtimeFeedbacks();
     state.weeklyFeedbacks = await apiClient.getWeeklyFeedbacks();
     state.summary = await apiClient.getDashboardSummary();
+    if (canManageFeedback.value) {
+      state.weeklyAnalytics = await apiClient.getWeeklyFeedbackAnalytics();
+      state.weeklySummaries = await apiClient.getWeeklyFeedbackSummaries();
+    }
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "回复失败");
   }
@@ -1144,8 +1645,24 @@ async function updateFeedbackStatus(feedbackType, feedbackId, status) {
     state.realtimeFeedbacks = await apiClient.getRealtimeFeedbacks();
     state.weeklyFeedbacks = await apiClient.getWeeklyFeedbacks();
     state.summary = await apiClient.getDashboardSummary();
+    if (canManageFeedback.value) {
+      state.weeklyAnalytics = await apiClient.getWeeklyFeedbackAnalytics();
+      state.weeklySummaries = await apiClient.getWeeklyFeedbackSummaries();
+    }
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "状态更新失败");
+  }
+}
+
+async function generateAiSummaries() {
+  generatingAiSummary.value = true;
+  try {
+    state.weeklySummaries = await apiClient.generateWeeklyFeedbackAiSummaries();
+    ElMessage.success("AI 总评已生成");
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "AI 总评生成失败");
+  } finally {
+    generatingAiSummary.value = false;
   }
 }
 
@@ -1168,39 +1685,7 @@ function cellText(value) {
 async function importScheduleExcel(file) {
   importingSchedule.value = true;
   try {
-    const workbook = new ExcelJS.Workbook();
-    const buffer = await file.arrayBuffer();
-    await workbook.xlsx.load(buffer);
-
-    const worksheet = workbook.worksheets[0];
-    if (!worksheet) {
-      throw new Error("Excel 中没有可读取的工作表");
-    }
-
-    const headerRow = worksheet.getRow(1);
-    const headers = [];
-    headerRow.eachCell((cell, colNumber) => {
-      headers[colNumber] = cellText(cell.value);
-    });
-
-    const rows = [];
-    worksheet.eachRow((row, rowNumber) => {
-      if (rowNumber === 1) {
-        return;
-      }
-
-      const item = {};
-      row.eachCell((cell, colNumber) => {
-        const header = headers[colNumber];
-        if (header) {
-          item[header] = cellText(cell.value);
-        }
-      });
-
-      if (Object.values(item).some(Boolean)) {
-        rows.push(item);
-      }
-    });
+    const rows = await readExcelRows(file);
 
     if (rows.length === 0) {
       throw new Error("没有读取到有效课表数据");
@@ -1217,11 +1702,110 @@ async function importScheduleExcel(file) {
     state.masterData.classes = await apiClient.getMasterData("classes");
     state.masterData.courses = await apiClient.getMasterData("courses");
     state.masterData.teachers = await apiClient.getMasterData("teachers");
+    state.weeklyTasks = await apiClient.getWeeklyTasks();
+    state.weeklyTaskItems = await apiClient.getWeeklyTaskItems();
+    state.weeklyTaskCompliance = await apiClient.getWeeklyTaskCompliance();
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "课表导入失败");
   } finally {
     importingSchedule.value = false;
   }
+}
+
+async function downloadScheduleImportTemplate() {
+  const workbook = new ExcelJS.Workbook();
+  const worksheet = workbook.addWorksheet("课表导入");
+  worksheet.addRow([
+    "教师所在院系",
+    "计划授课教师",
+    "实际授课教师",
+    "上课班级",
+    "开课课程",
+    "上课周次",
+    "教室",
+    "day",
+    "serial",
+    "辅导方式"
+  ]);
+  worksheet.addRow([
+    state.currentUser?.departmentName || "计算机科学与工程学院",
+    "测试教师A",
+    "测试教师A",
+    state.currentUser?.className || "软件工程2024级2班",
+    "Academic Culture and Research Skills Advanced",
+    "2-16周",
+    "1-208",
+    2,
+    0,
+    "线下"
+  ]);
+  worksheet.columns.forEach((column) => {
+    column.width = 24;
+  });
+  worksheet.getRow(1).font = { bold: true };
+  worksheet.getRow(1).alignment = { vertical: "middle", horizontal: "center", wrapText: true };
+  const buffer = await workbook.xlsx.writeBuffer();
+  const blob = new Blob([buffer], {
+    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "课表任课关系导入模板.xlsx";
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+async function importUsersExcel(file) {
+  importingSchedule.value = true;
+  try {
+    const rows = await readExcelRows(file);
+    if (rows.length === 0) {
+      throw new Error("没有读取到有效用户数据");
+    }
+    const result = await apiClient.importUsers({ rows });
+    ElMessage.success(`用户导入完成：成功 ${result.importedCount} 行，跳过 ${result.skippedCount} 行`);
+    state.users = await apiClient.getUsers();
+    state.masterData.departments = await apiClient.getMasterData("departments");
+    state.masterData.majors = await apiClient.getMasterData("majors");
+    state.masterData.classes = await apiClient.getMasterData("classes");
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "用户导入失败");
+  } finally {
+    importingSchedule.value = false;
+  }
+}
+
+async function readExcelRows(file) {
+  const workbook = new ExcelJS.Workbook();
+  const buffer = await file.arrayBuffer();
+  await workbook.xlsx.load(buffer);
+  const worksheet = workbook.worksheets[0];
+  if (!worksheet) {
+    throw new Error("Excel 中没有可读取的工作表");
+  }
+  const headerRow = worksheet.getRow(1);
+  const headers = [];
+  headerRow.eachCell((cell, colNumber) => {
+    headers[colNumber] = cellText(cell.value);
+  });
+  const rows = [];
+  worksheet.eachRow((row, rowNumber) => {
+    if (rowNumber === 1) {
+      return;
+    }
+    const item = {};
+    row.eachCell((cell, colNumber) => {
+      const header = headers[colNumber];
+      if (header) {
+        item[header] = cellText(cell.value);
+      }
+    });
+    if (Object.values(item).some(Boolean)) {
+      rows.push(item);
+    }
+  });
+  return rows;
 }
 
 function handleScheduleFileChange(file) {
@@ -1235,6 +1819,17 @@ function handleScheduleFileChange(file) {
   }
 
   importScheduleExcel(file.raw);
+}
+
+function handleUserFileChange(file) {
+  if (!file?.raw) {
+    return;
+  }
+  if (!file.name.endsWith(".xlsx")) {
+    ElMessage.warning("用户导入仅支持 .xlsx，请先将 .xls 另存为 .xlsx");
+    return;
+  }
+  importUsersExcel(file.raw);
 }
 
 function statusType(status) {
@@ -1257,14 +1852,71 @@ function urgencyType(level) {
   return map[level] || "info";
 }
 
+function urgencyLabel(level) {
+  const map = {
+    HIGH: "紧急",
+    MEDIUM: "一般",
+    LOW: "普通"
+  };
+  return map[level] || level || "普通";
+}
+
 function complianceType(status) {
   const map = {
     OVERDUE_MISSING: "danger",
     LATE_SUBMITTED: "warning",
+    SUBMITTED_WITH_LOW_QUALITY: "warning",
+    LOW_QUALITY: "warning",
     PENDING: "info",
     SUBMITTED: "success"
   };
   return map[status] || "info";
+}
+
+function statusLabel(status) {
+  const map = {
+    PENDING: "待提交",
+    IN_PROGRESS: "处理中",
+    PENDING_REPLY: "待回复",
+    SUBMITTED: "已提交",
+    REPLIED: "已回复",
+    CLOSED: "已关闭"
+  };
+  return map[status] || status || "待处理";
+}
+
+function complianceLabel(status) {
+  const map = {
+    OVERDUE_MISSING: "逾期未交",
+    LATE_SUBMITTED: "迟交",
+    SUBMITTED_WITH_LOW_QUALITY: "已交但质量偏低",
+    LOW_QUALITY: "质量偏低",
+    PENDING: "待提交",
+    SUBMITTED: "已提交"
+  };
+  return map[status] || status || "待提交";
+}
+
+function feedbackTypeLabel(type) {
+  const map = {
+    HARDWARE: "硬件问题",
+    TEACHING: "教学问题",
+    DISCIPLINE: "课堂纪律",
+    OTHER: "其他",
+    WEEKLY: "课程反馈",
+    REALTIME: "实时反馈"
+  };
+  return map[type] || type || "其他";
+}
+
+function roleLabel(role) {
+  const map = {
+    SUPER_ADMIN: "超级管理员",
+    DEPARTMENT_ADMIN: "院系管理员",
+    CLASS_REPRESENTATIVE: "学委",
+    STUDENT: "普通学生"
+  };
+  return map[role] || role || "用户";
 }
 
 onMounted(initializeAuth);
@@ -1304,7 +1956,15 @@ onMounted(initializeAuth);
         <el-tab-pane label="学校账号登录" name="academic">
           <el-form label-position="top" @keyup.enter="academicLogin">
             <el-form-item label="学号">
-              <el-input v-model="academicLoginForm.account" :prefix-icon="UserFilled" placeholder="请输入学校学号" />
+              <el-input
+                v-model="academicLoginForm.account"
+                :prefix-icon="UserFilled"
+                placeholder="请输入学校学号"
+                name="username"
+                autocomplete="username"
+                @input="persistAcademicLoginDraft"
+                @blur="persistAcademicLoginDraft"
+              />
             </el-form-item>
             <el-form-item label="教务密码">
               <el-input
@@ -1313,9 +1973,17 @@ onMounted(initializeAuth);
                 show-password
                 :prefix-icon="Lock"
                 placeholder="用于本次教务认证，可选择记住"
+                name="password"
+                autocomplete="current-password"
+                @input="persistAcademicLoginDraft"
+                @blur="persistAcademicLoginDraft"
               />
             </el-form-item>
-            <el-checkbox v-model="academicLoginForm.rememberPassword" class="remember-password">
+            <el-checkbox
+              v-model="academicLoginForm.rememberPassword"
+              class="remember-password"
+              @change="handleRememberPasswordChange"
+            >
               记住教务密码，仅保存在本机浏览器
             </el-checkbox>
             <el-form-item label="验证码">
@@ -1387,10 +2055,10 @@ onMounted(initializeAuth);
         background-color="transparent"
         text-color="#44515f"
         active-text-color="#0f766e"
-        @select="activeMenu = $event"
+        @select="selectMenu"
       >
         <el-menu-item
-          v-for="item in menuItems"
+          v-for="item in visibleMenuItems"
           :key="item.key"
           :index="item.key"
         >
@@ -1399,10 +2067,6 @@ onMounted(initializeAuth);
         </el-menu-item>
       </el-menu>
 
-      <section class="aside-card">
-        <p class="eyebrow">系统提示</p>
-        <p>下一阶段重点：统一认证、教务只读接口、院系权限隔离、操作日志。</p>
-      </section>
     </el-aside>
 
     <el-container>
@@ -1412,9 +2076,6 @@ onMounted(initializeAuth);
           <h2>{{ pageTitle }}</h2>
         </div>
         <div class="header-actions">
-          <el-tag effect="dark" type="success">
-            后端 {{ state.health?.status || "UNKNOWN" }}
-          </el-tag>
           <el-button :icon="Refresh" @click="loadAllData">刷新</el-button>
           <el-dropdown>
             <el-button type="primary" plain>
@@ -1423,7 +2084,7 @@ onMounted(initializeAuth);
             <template #dropdown>
               <el-dropdown-menu>
                 <el-dropdown-item>
-                  {{ state.currentUser?.role || "未加载角色" }}
+                  {{ state.currentUser?.roleName || roleLabel(state.currentUser?.role) }}
                 </el-dropdown-item>
                 <el-dropdown-item>
                   {{ state.currentUser?.departmentName || "未绑定院系" }}
@@ -1441,22 +2102,27 @@ onMounted(initializeAuth);
         <template v-if="activeMenu === 'dashboard'">
           <section class="hero-grid">
             <el-card class="hero-card" shadow="never">
-              <p class="eyebrow">系统概览</p>
-              <h3>面向山东科技大学济南校区落地的教学反馈平台</h3>
-              <p>
-                当前版本已经从毕设演示骨架升级为工程化管理端，后续可逐步接入统一认证、教务课表、院系管理员和质量监控流程。
-              </p>
+              <p class="eyebrow">{{ isPlainStudent ? "我的反馈" : "系统概览" }}</p>
+              <h3>
+                {{ isPlainStudent ? "查看本周课表，提交实时教学反馈" : "面向山东科技大学济南校区落地的教学反馈平台" }}
+              </h3>
+              <p>{{ isPlainStudent ? "普通学生可以查看自己的课程安排，并对课堂、设备或其他教学相关问题进行反馈。" : "查看课程反馈、处理实时问题，并按班级、课程、教师汇总教学情况。" }}</p>
               <div class="hero-actions">
-                <el-button type="primary" :icon="Upload" @click="activeMenu = 'schedule'">
-                  课表接入
+                <el-button
+                  v-if="canManageFeedback || isClassRepresentative"
+                  type="primary"
+                  :icon="Upload"
+                  @click="activeMenu = 'schedule'"
+                >
+                  {{ isClassRepresentative ? "课程反馈" : "课表接入" }}
                 </el-button>
                 <el-button :icon="DocumentChecked" @click="activeMenu = 'feedback'">
-                  处理反馈
+                  {{ isPlainStudent ? "提交反馈" : "处理反馈" }}
                 </el-button>
               </div>
             </el-card>
 
-            <el-card class="risk-card" shadow="never">
+            <el-card v-if="canManageFeedback" class="risk-card" shadow="never">
               <template #header>
                 <div class="card-header">
                   <span>高优先级待办</span>
@@ -1468,7 +2134,7 @@ onMounted(initializeAuth);
                   v-for="item in highPriorityFeedbacks"
                   :key="item.id"
                   type="danger"
-                  :timestamp="item.status"
+                  :timestamp="statusLabel(item.status)"
                 >
                   {{ item.title }}
                 </el-timeline-item>
@@ -1528,8 +2194,11 @@ onMounted(initializeAuth);
                   >
                     <strong>{{ timetableCell(day.index, serial).simple.courseName }}</strong>
                     <span>{{ timetableCell(day.index, serial).simple.classroom || "教室待确认" }}</span>
-                    <small>{{ timetableCell(day.index, serial).simple.teacherName || "教师待确认" }}</small>
-                    <small>{{ timetableCell(day.index, serial).simple.weeksRaw }}</small>
+          <small>{{ timetableCell(day.index, serial).simple.teacherName || "教师待确认" }}</small>
+          <small v-if="timetableCell(day.index, serial).simple.sectionText">
+            {{ timetableCell(day.index, serial).simple.sectionText }}
+          </small>
+          <small>{{ timetableCell(day.index, serial).simple.weeksRaw }}</small>
                     <i v-if="timetableCell(day.index, serial).all.length > 1" class="course-corner" />
                   </article>
                   <span v-else class="empty-course">暂无课程</span>
@@ -1538,65 +2207,7 @@ onMounted(initializeAuth);
             </div>
           </el-card>
 
-          <el-card
-            v-if="isStudentLike"
-            shadow="never"
-            class="section-card grade-card"
-          >
-            <template #header>
-              <div class="card-header">
-                <span>本人查成绩试验</span>
-                <el-tag type="warning">仅临时查询，不保存成绩</el-tag>
-              </div>
-            </template>
-            <el-alert
-              class="section-alert"
-              :title="academicSessionId ? '和山科小站一样复用学校账号登录态，只能查询当前登录学号本人成绩；正式反馈系统不保存成绩。' : '当前只有本系统登录态，教务会话已失效；查询成绩前需要重新进行学校账号认证。'"
-              :type="academicSessionId ? 'warning' : 'info'"
-              :closable="false"
-              show-icon
-            />
-            <div class="grade-query">
-              <el-input
-                v-model="gradeQueryForm.termCode"
-                placeholder="学期代码，可空表示全部，例如：2025-2026-2"
-              />
-              <el-button
-                type="primary"
-                :loading="queryingGrades"
-                @click="queryMyGrades"
-              >
-                {{ academicSessionId ? "查询本人成绩" : "重新学校认证" }}
-              </el-button>
-            </div>
-            <div v-if="state.gradeSummary" class="grade-summary">
-              <el-tag>条数：{{ state.gradeSummary.count }}</el-tag>
-              <el-tag type="success">总学分：{{ state.gradeSummary.creditTotal }}</el-tag>
-              <el-tag type="info">平均绩点：{{ state.gradeSummary.averageGpa }}</el-tag>
-              <el-tag type="warning">加权绩点：{{ state.gradeSummary.weightedGpa }}</el-tag>
-            </div>
-            <el-table
-              v-if="state.gradeRecords.length > 0"
-              :data="state.gradeRecords"
-              border
-              stripe
-              class="grade-table"
-            >
-              <el-table-column prop="name" label="课程名称" min-width="220" />
-              <el-table-column prop="grade" label="成绩" width="90" />
-              <el-table-column prop="credit" label="学分" width="90" />
-              <el-table-column prop="gpa" label="绩点" width="90" />
-              <el-table-column prop="type" label="课程类型" width="120" />
-              <el-table-column prop="makeup" label="补考" width="100" />
-              <el-table-column prop="rebuild" label="重修" width="100" />
-            </el-table>
-            <el-empty
-              v-else-if="state.gradeSummary"
-              description="未查到成绩记录，可尝试清空学期代码后再次查询"
-            />
-          </el-card>
-
-          <section class="stat-grid">
+          <section v-if="!isPlainStudent" class="stat-grid">
             <el-card
               v-for="card in statCards"
               :key="card.label"
@@ -1611,64 +2222,59 @@ onMounted(initializeAuth);
             </el-card>
           </section>
 
-          <el-card shadow="never" class="section-card">
-            <template #header>
-              <div class="card-header">
-                <span>系统模块状态</span>
-                <el-tag>API /api/v1</el-tag>
-              </div>
-            </template>
-            <el-space wrap>
-              <el-tag v-for="moduleName in state.modules" :key="moduleName" round>
-                {{ moduleName }}
-              </el-tag>
-            </el-space>
-          </el-card>
         </template>
 
-        <template v-if="activeMenu === 'baseData'">
+        <template v-if="activeMenu === 'baseData' && canManageFeedback">
           <el-card shadow="never" class="section-card">
             <template #header>
               <div class="card-header">
                 <span>用户与角色</span>
-                <el-input
-                  class="table-search"
-                  placeholder="搜索用户、角色、院系"
-                  :prefix-icon="Search"
-                />
+                <div class="header-actions">
+                  <el-upload
+                    :auto-upload="false"
+                    :show-file-list="false"
+                    accept=".xlsx"
+                    :on-change="handleUserFileChange"
+                  >
+                    <el-button :icon="Upload" :loading="importingSchedule">
+                      导入学生/教师名单
+                    </el-button>
+                  </el-upload>
+                  <el-input
+                    class="table-search"
+                    placeholder="搜索用户、角色、院系"
+                    :prefix-icon="Search"
+                  />
+                </div>
               </div>
             </template>
-            <el-table :data="state.users" stripe border>
+            <el-table :data="state.users" stripe border class="user-role-table">
               <el-table-column prop="id" label="ID" width="80" />
-              <el-table-column prop="username" label="账号" />
-              <el-table-column prop="realName" label="姓名" />
-              <el-table-column prop="role" label="角色">
+              <el-table-column prop="username" label="账号" min-width="150" show-overflow-tooltip />
+              <el-table-column prop="realName" label="姓名" min-width="140" show-overflow-tooltip />
+              <el-table-column prop="role" label="角色" width="130">
                 <template #default="{ row }">
-                  <el-tag>{{ row.role }}</el-tag>
+                  <el-tag>{{ row.roleName || roleLabel(row.role) }}</el-tag>
                 </template>
               </el-table-column>
-              <el-table-column prop="departmentName" label="院系" />
+              <el-table-column prop="departmentName" label="院系" min-width="190" show-overflow-tooltip />
+              <el-table-column prop="className" label="班级" min-width="170" show-overflow-tooltip />
+              <el-table-column prop="status" label="状态" width="100">
+                <template #default="{ row }">
+                  <el-tag :type="row.status === 'ACTIVE' ? 'success' : 'danger'">
+                    {{ row.status === "ACTIVE" ? "启用" : "禁用" }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" width="120">
+                <template #default="{ row }">
+                  <el-button size="small" @click="openUserAuthorization(row)">
+                    授权
+                  </el-button>
+                </template>
+              </el-table-column>
             </el-table>
           </el-card>
-
-          <section class="todo-grid">
-            <el-card shadow="never">
-              <template #header>建议接入方式</template>
-              <el-steps direction="vertical" :active="1" finish-status="success">
-                <el-step title="Excel 导入先跑通" />
-                <el-step title="申请教务只读 API" />
-                <el-step title="接入统一身份认证" />
-              </el-steps>
-            </el-card>
-            <el-card shadow="never">
-              <template #header>数据库接口状态</template>
-              <el-descriptions :column="1" border>
-                <el-descriptions-item label="接口前缀">/api/v1/master-data</el-descriptions-item>
-                <el-descriptions-item label="数据源">Spring Boot 直连 MySQL</el-descriptions-item>
-                <el-descriptions-item label="用途">支撑课表导入、权限隔离、周任务生成</el-descriptions-item>
-              </el-descriptions>
-            </el-card>
-          </section>
 
           <el-card shadow="never" class="section-card">
             <template #header>
@@ -1713,14 +2319,17 @@ onMounted(initializeAuth);
           </el-card>
         </template>
 
-        <template v-if="activeMenu === 'schedule'">
+        <template v-if="activeMenu === 'schedule' && (canManageFeedback || isClassRepresentative)">
           <el-card shadow="never" class="section-card">
             <template #header>
               <div class="card-header">
                 <span>周反馈任务</span>
                 <div v-if="canManageFeedback" class="header-actions">
-                  <el-button :icon="Plus" @click="taskGenerateDrawerVisible = true">
+                  <el-button :icon="Plus" @click="openTaskGenerateDrawer">
                     生成周任务
+                  </el-button>
+                  <el-button :icon="Download" plain @click="downloadScheduleImportTemplate">
+                    下载导入模板
                   </el-button>
                   <el-upload
                     :auto-upload="false"
@@ -1763,7 +2372,7 @@ onMounted(initializeAuth);
               <el-table-column prop="status" label="状态">
                 <template #default="{ row }">
                   <el-tag :type="statusType(row.status)">
-                    {{ row.status }}
+                    {{ statusLabel(row.status) }}
                   </el-tag>
                 </template>
               </el-table-column>
@@ -1771,6 +2380,60 @@ onMounted(initializeAuth);
           </el-card>
 
           <el-card shadow="never" class="section-card">
+            <template #header>
+              <div class="card-header">
+                <span>本周课程逐门反馈</span>
+                <el-tag type="success">
+                  {{ courseFeedbackItems.filter((item) => item.feedbackId).length }}/{{ courseFeedbackItems.length }} 已提交
+                </el-tag>
+              </div>
+            </template>
+            <el-alert
+              class="section-alert"
+              title="系统按周反馈任务和本周课表自动拆成逐门课程评价项；学委需要对每一门本周课程提交反馈。"
+              type="success"
+              :closable="false"
+              show-icon
+            />
+            <el-empty
+              v-if="courseFeedbackItems.length === 0"
+              description="暂无本周课程。请先导入课表任课关系，并确认周次包含当前生成任务的周次。"
+            />
+            <el-table :data="courseFeedbackItems" border stripe>
+              <el-table-column prop="weekNo" label="周次" width="80" />
+              <el-table-column prop="className" label="班级" min-width="160" />
+              <el-table-column prop="courseName" label="课程" min-width="200" />
+              <el-table-column prop="teacherName" label="教师" min-width="150">
+                <template #default="{ row }">
+                  {{ row.teacherName || row.actualTeacherName || row.plannedTeacherName || "待确认教师" }}
+                </template>
+              </el-table-column>
+              <el-table-column prop="classroom" label="教室" width="110" />
+              <el-table-column prop="deadline" label="截止时间" min-width="170" />
+              <el-table-column prop="itemStatus" label="提交状态" width="150">
+                <template #default="{ row }">
+                  <el-tag :type="complianceType(row.itemStatus)">
+                    {{ complianceLabel(row.itemStatus) }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column v-if="canManageFeedback" prop="qualityRemark" label="质量提示" min-width="190" />
+              <el-table-column v-if="canSubmitWeeklyFeedback" label="操作" width="130" fixed="right">
+                <template #default="{ row }">
+                  <el-button
+                    size="small"
+                    type="primary"
+                    plain
+                    @click="openWeeklyFeedbackForItem(row)"
+                  >
+                    {{ row.feedbackId ? "补充修改" : "填写反馈" }}
+                  </el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+          </el-card>
+
+          <el-card v-if="canManageFeedback" shadow="never" class="section-card">
             <template #header>
               <div class="card-header">
                 <span>学委履职标记</span>
@@ -1801,45 +2464,117 @@ onMounted(initializeAuth);
                   {{ row.submittedAt || "未提交" }}
                 </template>
               </el-table-column>
+              <el-table-column prop="totalCourseCount" label="本周课程" width="100" />
+              <el-table-column prop="submittedCourseCount" label="已反馈" width="90" />
+              <el-table-column prop="missingCourseCount" label="未反馈" width="90" />
+              <el-table-column prop="lowQualityCount" label="低质量" width="90" />
               <el-table-column prop="complianceStatus" label="履职状态" width="150">
                 <template #default="{ row }">
                   <el-tag :type="complianceType(row.complianceStatus)">
-                    {{ row.complianceStatus }}
+                    {{ complianceLabel(row.complianceStatus) }}
                   </el-tag>
                 </template>
               </el-table-column>
-              <el-table-column prop="feedbackWordCount" label="反馈字数" width="110" />
+              <el-table-column v-if="canManageFeedback" prop="feedbackWordCount" label="反馈字数" width="110" />
               <el-table-column prop="qualityRemark" label="质量提示" min-width="220" />
             </el-table>
           </el-card>
         </template>
 
         <template v-if="activeMenu === 'feedback'">
+          <el-card
+            v-if="isStudentLike"
+            shadow="never"
+            class="section-card"
+          >
+            <template #header>
+              <div class="card-header">
+                <span>{{ isClassRepresentative ? "本周课程逐门反馈" : "我的课程反馈" }}</span>
+                <el-tag type="success">
+                  {{ courseFeedbackItems.filter((item) => item.feedbackId).length }}/{{ courseFeedbackItems.length }} 已提交
+                </el-tag>
+              </div>
+            </template>
+            <el-alert
+              class="section-alert"
+              :title="isClassRepresentative ? '学委需要对本周课表中的每一门课程提交反馈，系统会记录履职状态。' : '普通学生可以自愿反馈当前课表中的课程，课程范围由本周课表自动限定。'"
+              :type="isClassRepresentative ? 'warning' : 'info'"
+              :closable="false"
+              show-icon
+            />
+            <el-empty
+              v-if="courseFeedbackItems.length === 0"
+              description="暂无可反馈课程。请确认管理员已经导入课表并生成本周任务，或重新加载学校课表。"
+            />
+            <el-table :data="courseFeedbackItems" border stripe>
+              <el-table-column prop="weekNo" label="周次" width="80" />
+              <el-table-column prop="className" label="班级" min-width="160" />
+              <el-table-column prop="courseName" label="课程" min-width="200" />
+              <el-table-column prop="teacherName" label="教师" min-width="150">
+                <template #default="{ row }">
+                  {{ row.teacherName || row.actualTeacherName || row.plannedTeacherName || "待确认教师" }}
+                </template>
+              </el-table-column>
+              <el-table-column prop="classroom" label="教室" width="110" />
+              <el-table-column prop="itemStatus" label="反馈状态" width="150">
+                <template #default="{ row }">
+                  <el-tag :type="complianceType(row.itemStatus)">
+                    {{ row.feedbackId ? "已反馈" : "未反馈" }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" width="130" fixed="right">
+                <template #default="{ row }">
+                  <el-button
+                    size="small"
+                    type="primary"
+                    plain
+                    @click="openWeeklyFeedbackForItem(row)"
+                  >
+                    {{ row.feedbackId ? "补充修改" : "填写反馈" }}
+                  </el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+          </el-card>
+
           <el-card shadow="never" class="section-card">
             <template #header>
               <div class="card-header">
-                <span>实时反馈处理</span>
+                <span>{{ canManageFeedback ? "实时反馈处理" : "我的紧急/实时反馈" }}</span>
                 <el-button type="primary" :icon="DocumentChecked" @click="submitDrawerVisible = true">
-                  新增实时反馈
+                  新增紧急反馈
                 </el-button>
               </div>
             </template>
+            <el-alert
+              v-if="isStudentLike"
+              class="section-alert"
+              title="课程反馈用于评价某一门课；紧急/实时反馈用于设备故障、老师临时离场、课堂不适内容等需要随时上报的问题。"
+              type="info"
+              :closable="false"
+              show-icon
+            />
             <el-table :data="state.realtimeFeedbacks" border stripe>
               <el-table-column prop="id" label="编号" width="90" />
-              <el-table-column prop="type" label="类型" width="120" />
+              <el-table-column prop="type" label="类型" width="120">
+                <template #default="{ row }">
+                  {{ feedbackTypeLabel(row.type) }}
+                </template>
+              </el-table-column>
               <el-table-column prop="title" label="标题" min-width="180" />
               <el-table-column prop="content" label="内容" min-width="260" show-overflow-tooltip />
               <el-table-column prop="urgencyLevel" label="紧急程度" width="120">
                 <template #default="{ row }">
                   <el-tag :type="urgencyType(row.urgencyLevel)">
-                    {{ row.urgencyLevel }}
+                    {{ urgencyLabel(row.urgencyLevel) }}
                   </el-tag>
                 </template>
               </el-table-column>
               <el-table-column prop="status" label="状态" width="140">
                 <template #default="{ row }">
                   <el-tag :type="statusType(row.status)">
-                    {{ row.status }}
+                    {{ statusLabel(row.status) }}
                   </el-tag>
                 </template>
               </el-table-column>
@@ -1860,10 +2595,10 @@ onMounted(initializeAuth);
                   </el-tag>
                 </template>
               </el-table-column>
-              <el-table-column label="敏感标记" width="110">
+              <el-table-column v-if="canManageFeedback" label="敏感标记" width="110">
                 <template #default="{ row }">
                   <el-tag :type="row.flagCount > 0 ? 'danger' : 'info'">
-                    {{ row.flagCount || 0 }}
+                    {{ row.flagCount > 0 ? `风险 ${row.flagCount}` : "无" }}
                   </el-tag>
                 </template>
               </el-table-column>
@@ -1896,12 +2631,30 @@ onMounted(initializeAuth);
                   >
                     受理
                   </el-button>
+                  <el-button
+                    v-if="canEditOwnRealtime(row)"
+                    size="small"
+                    type="primary"
+                    plain
+                    @click="openRealtimeEdit(row)"
+                  >
+                    编辑
+                  </el-button>
+                  <el-button
+                    v-if="canEditOwnRealtime(row)"
+                    size="small"
+                    type="danger"
+                    plain
+                    @click="deleteRealtimeFeedback(row)"
+                  >
+                    删除
+                  </el-button>
                 </template>
               </el-table-column>
             </el-table>
           </el-card>
 
-          <el-card shadow="never" class="section-card">
+          <el-card v-if="canManageFeedback" shadow="never" class="section-card">
             <template #header>
               <div class="card-header">
                 <span>敏感信息强标</span>
@@ -1909,7 +2662,11 @@ onMounted(initializeAuth);
               </div>
             </template>
             <el-table :data="state.feedbackFlags" border stripe>
-              <el-table-column prop="feedbackType" label="反馈类型" width="120" />
+              <el-table-column prop="feedbackType" label="反馈类型" width="120">
+                <template #default="{ row }">
+                  {{ feedbackTypeLabel(row.feedbackType) }}
+                </template>
+              </el-table-column>
               <el-table-column prop="feedbackId" label="反馈编号" width="100" />
               <el-table-column prop="flagType" label="标记类型" width="140" />
               <el-table-column prop="flagValue" label="命中内容" min-width="180" />
@@ -1917,38 +2674,43 @@ onMounted(initializeAuth);
             </el-table>
           </el-card>
 
-          <el-card shadow="never" class="section-card">
+          <el-card
+            v-if="canManageFeedback || isStudentLike"
+            shadow="never"
+            class="section-card"
+          >
             <template #header>
               <div class="card-header">
                 <span>周反馈记录</span>
                 <el-button
+                  v-if="canSubmitWeeklyFeedback"
                   type="primary"
                   :icon="Plus"
                   @click="resetWeeklyFeedbackForm(); weeklyFeedbackDrawerVisible = true"
                 >
-                  学委提交周反馈
+                  {{ isClassRepresentative ? "学委提交周反馈" : "提交课程反馈" }}
                 </el-button>
-                <el-button :icon="Download" @click="exportWeeklyFeedbackTable">
+                <el-button v-if="canManageFeedback" :icon="Download" @click="exportWeeklyFeedbackTable">
                   导出学生层面反馈表
                 </el-button>
               </div>
             </template>
             <el-alert
               class="section-alert"
-              title="此处导出字段严格对应老师表格：教师所在院系、计划授课教师、实际授课教师、上课班级、开课课程、上课周次、作业考核、辅导方式、教学效果或收获、问题建议、硬件问题、备注。"
-              type="success"
+              :title="canManageFeedback ? '此处导出字段严格对应老师表格：教师所在院系、计划授课教师、实际授课教师、上课班级、开课课程、上课周次、作业考核、辅导方式、教学效果或收获、问题建议、硬件问题、备注。' : '这里仅显示本人提交过的课程反馈和管理员处理意见。'"
+              :type="canManageFeedback ? 'success' : 'info'"
               :closable="false"
               show-icon
             />
             <el-table :data="state.weeklyFeedbacks" border stripe>
-              <el-table-column prop="teacherDepartmentName" label="教师所在院系" min-width="150" />
-              <el-table-column prop="plannedTeacherName" label="计划授课教师" min-width="160" />
+              <el-table-column v-if="canManageFeedback" prop="teacherDepartmentName" label="教师所在院系" min-width="150" />
+              <el-table-column v-if="canManageFeedback" prop="plannedTeacherName" label="计划授课教师" min-width="160" />
               <el-table-column prop="className" label="班级" />
               <el-table-column prop="courseName" label="课程" />
               <el-table-column prop="actualTeacherName" label="授课教师" min-width="160" />
               <el-table-column prop="weekRange" label="周次" width="90" />
-              <el-table-column prop="assignmentAssessment" label="作业考核" min-width="130" />
-              <el-table-column prop="guidanceMode" label="辅导方式" />
+              <el-table-column v-if="canManageFeedback" prop="assignmentAssessment" label="作业考核" min-width="130" />
+              <el-table-column v-if="canManageFeedback" prop="guidanceMode" label="辅导方式" />
               <el-table-column prop="learningOutcome" label="教学效果或收获" min-width="180" show-overflow-tooltip />
               <el-table-column prop="issueSuggestion" label="问题建议" min-width="180" />
               <el-table-column prop="hardwareIssue" label="硬件问题" min-width="180" />
@@ -1956,7 +2718,7 @@ onMounted(initializeAuth);
               <el-table-column prop="status" label="状态" width="130">
                 <template #default="{ row }">
                   <el-tag :type="statusType(row.status)">
-                    {{ row.status }}
+                    {{ statusLabel(row.status) }}
                   </el-tag>
                 </template>
               </el-table-column>
@@ -1991,57 +2753,105 @@ onMounted(initializeAuth);
           </el-card>
         </template>
 
-        <template v-if="activeMenu === 'analytics'">
-          <section class="todo-grid">
-            <el-card shadow="never">
-              <template #header>统计分析规划</template>
-              <el-result
-                icon="success"
-                title="统计模块待接真实数据库"
-                sub-title="后续按院系、班级、课程、教师、周次、敏感词维度聚合。"
-              />
-            </el-card>
-            <el-card shadow="never">
-              <template #header>AI 总评规划</template>
-              <el-alert
-                title="落地时必须支持开关和脱敏"
-                type="warning"
-                :closable="false"
-                show-icon
-              />
-              <el-divider />
-              <el-descriptions :column="1" border>
-                <el-descriptions-item label="输入">多班级文本反馈</el-descriptions-item>
-                <el-descriptions-item label="输出">课程总评、风险摘要、处理建议</el-descriptions-item>
-                <el-descriptions-item label="安全">敏感信息脱敏后再调用模型</el-descriptions-item>
-              </el-descriptions>
-            </el-card>
-          </section>
-        </template>
-
-        <template v-if="activeMenu === 'governance'">
+        <template v-if="activeMenu === 'analytics' && canManageFeedback">
           <el-card shadow="never" class="section-card">
-            <template #header>学校落地对接清单</template>
-            <el-timeline>
-              <el-timeline-item type="primary" timestamp="业务">
-                明确业务负责人：教务处、学院教学秘书、教学质量监控部门。
-              </el-timeline-item>
-              <el-timeline-item type="success" timestamp="数据">
-                申请教务系统只读接口或定期 Excel 数据交换。
-              </el-timeline-item>
-              <el-timeline-item type="warning" timestamp="认证">
-                接入统一身份认证，避免学生和教师重复注册。
-              </el-timeline-item>
-              <el-timeline-item type="danger" timestamp="安全">
-                落实权限隔离、日志审计、数据脱敏、导出审批。
-              </el-timeline-item>
-            </el-timeline>
+            <template #header>
+              <div class="card-header">
+                <span>课程总评与风险摘要</span>
+                <div class="header-actions">
+                  <el-tag type="warning">{{ state.weeklySummaries.length }} 条</el-tag>
+                  <el-button
+                    type="primary"
+                    plain
+                    :loading="generatingAiSummary"
+                    @click="generateAiSummaries"
+                  >
+                    AI生成总评
+                  </el-button>
+                </div>
+              </div>
+            </template>
+            <el-alert
+              class="section-alert"
+              title="当前为本地规则生成的总评：先按课程、教师汇总反馈，并结合敏感词和硬件问题标记风险；后续可替换为真正大模型润色。"
+              type="info"
+              :closable="false"
+              show-icon
+            />
+            <el-table :data="state.weeklySummaries" border stripe>
+              <el-table-column prop="teacherName" label="教师" min-width="150" />
+              <el-table-column prop="courseName" label="课程" min-width="220" />
+              <el-table-column prop="classes" label="涉及班级" min-width="180" show-overflow-tooltip />
+              <el-table-column prop="feedbackCount" label="反馈数" width="90" />
+              <el-table-column label="风险" width="100">
+                <template #default="{ row }">
+                  <el-tag :type="(row.aiRiskLevel || row.riskLevel) === 'HIGH' ? 'danger' : (row.aiRiskLevel || row.riskLevel) === 'MEDIUM' ? 'warning' : 'success'">
+                    {{ (row.aiRiskLevel || row.riskLevel) === "HIGH" ? "高" : (row.aiRiskLevel || row.riskLevel) === "MEDIUM" ? "中" : "低" }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="总评" min-width="420" show-overflow-tooltip>
+                <template #default="{ row }">
+                  {{ row.aiSummary || row.modelSummary }}
+                </template>
+              </el-table-column>
+              <el-table-column label="AI建议" min-width="220" show-overflow-tooltip>
+                <template #default="{ row }">
+                  {{ Array.isArray(row.aiSuggestions) ? row.aiSuggestions.join("；") : row.aiError || "未生成" }}
+                </template>
+              </el-table-column>
+            </el-table>
           </el-card>
+
+          <el-card shadow="never" class="section-card">
+            <template #header>
+              <div class="card-header">
+                <span>按班级聚合</span>
+                <el-tag>{{ state.weeklyAnalytics.byClass.length }} 条</el-tag>
+              </div>
+            </template>
+            <el-table :data="state.weeklyAnalytics.byClass" border stripe>
+              <el-table-column prop="className" label="班级" min-width="180" />
+              <el-table-column prop="feedbackCount" label="反馈数" width="100" />
+              <el-table-column prop="participantCount" label="参与人数" width="110" />
+              <el-table-column prop="needReplyCount" label="需回复" width="100" />
+              <el-table-column prop="lowQualityCount" label="低质量" width="100" />
+              <el-table-column prop="sensitiveFlagCount" label="敏感标记" width="110" />
+              <el-table-column prop="latestSubmittedAt" label="最近提交" width="180" />
+            </el-table>
+          </el-card>
+
+          <el-card shadow="never" class="section-card">
+            <template #header>按课程聚合</template>
+            <el-table :data="state.weeklyAnalytics.byCourse" border stripe>
+              <el-table-column prop="courseName" label="课程" min-width="220" />
+              <el-table-column prop="feedbackCount" label="反馈数" width="100" />
+              <el-table-column prop="participantCount" label="参与人数" width="110" />
+              <el-table-column prop="needReplyCount" label="需回复" width="100" />
+              <el-table-column prop="lowQualityCount" label="低质量" width="100" />
+              <el-table-column prop="sensitiveFlagCount" label="敏感标记" width="110" />
+              <el-table-column prop="latestSubmittedAt" label="最近提交" width="180" />
+            </el-table>
+          </el-card>
+
+          <el-card shadow="never" class="section-card">
+            <template #header>按教师聚合</template>
+            <el-table :data="state.weeklyAnalytics.byTeacher" border stripe>
+              <el-table-column prop="teacherName" label="教师" min-width="180" />
+              <el-table-column prop="feedbackCount" label="反馈数" width="100" />
+              <el-table-column prop="participantCount" label="参与人数" width="110" />
+              <el-table-column prop="needReplyCount" label="需回复" width="100" />
+              <el-table-column prop="lowQualityCount" label="低质量" width="100" />
+              <el-table-column prop="sensitiveFlagCount" label="敏感标记" width="110" />
+              <el-table-column prop="latestSubmittedAt" label="最近提交" width="180" />
+            </el-table>
+          </el-card>
+
         </template>
       </el-main>
     </el-container>
 
-    <el-drawer v-model="submitDrawerVisible" title="新增实时反馈" size="420px">
+    <el-drawer v-model="submitDrawerVisible" title="新增紧急/实时反馈" size="420px">
       <el-form label-position="top">
         <el-form-item label="反馈类型">
           <el-select v-model="realtimeForm.type" class="full-width">
@@ -2070,6 +2880,12 @@ onMounted(initializeAuth);
             :rows="5"
             placeholder="请描述发生了什么、影响范围、是否需要回复。"
           />
+          <div class="form-tip-row">
+            <span>当前 {{ realtimeFeedbackWordCount }} 字</span>
+            <el-tag :type="realtimeFeedbackWordCount >= 20 ? 'success' : 'warning'" size="small">
+              {{ realtimeFeedbackWordCount >= 20 ? "内容较完整" : "建议不少于20字" }}
+            </el-tag>
+          </div>
         </el-form-item>
         <el-form-item>
           <el-checkbox v-model="realtimeForm.needReply">需要管理员回复</el-checkbox>
@@ -2127,16 +2943,7 @@ onMounted(initializeAuth);
           <p>教室：{{ course.classroom || "教室待确认" }}</p>
           <p>教师：{{ course.teacherName || "教师待确认" }}</p>
           <p>周次：{{ course.weeksRaw || course.weekRange || "当前周" }}</p>
-          <p>位置：周{{ Number(course.day) + 1 }}，{{ sectionLabel(Number(course.serial || 0)) }}</p>
-          <p v-if="!course.teacherName">
-            原始教师字段：{{ course.raw?.teacher || course.raw?.jsxm || course.raw?.skjs || course.raw?.rkjs || "空" }}
-          </p>
-          <p v-if="!course.teacherName">
-            原始分行：{{ (course.raw?.debugLines || []).join(" | ") || "空" }}
-          </p>
-          <p v-if="!course.teacherName">
-            Title字段：{{ (course.raw?.debugTitles || []).join(" | ") || "空" }}
-          </p>
+          <p>位置：周{{ Number(course.day) + 1 }}，{{ course.sectionText || sectionLabel(Number(course.serial || 0)) }}</p>
         </article>
       </section>
     </el-dialog>
@@ -2147,8 +2954,20 @@ onMounted(initializeAuth);
       size="420px"
     >
       <el-form label-position="top">
-        <el-form-item label="学期 ID">
-          <el-input-number v-model="taskGenerateForm.termId" class="full-width" :min="1" />
+        <el-form-item label="学期">
+          <el-select
+            v-model="taskGenerateForm.termId"
+            class="full-width"
+            filterable
+            placeholder="请选择学期"
+          >
+            <el-option
+              v-for="term in state.masterData.terms"
+              :key="term.id"
+              :label="`${term.academicYear || ''}-${term.semester || ''}${term.status === 'ACTIVE' ? '（当前）' : ''}`"
+              :value="term.id"
+            />
+          </el-select>
         </el-form-item>
         <el-form-item label="周次">
           <el-input-number v-model="taskGenerateForm.weekNo" class="full-width" :min="1" />
@@ -2162,14 +2981,26 @@ onMounted(initializeAuth);
             placeholder="选择截止时间"
           />
         </el-form-item>
-        <el-form-item label="班级 ID，逗号分隔，留空代表全部班级">
-          <el-input
-            v-model="taskGenerateForm.classGroupIdsText"
-            placeholder="例如：1,2,3"
-          />
+        <el-form-item label="班级">
+          <el-select
+            v-model="taskGenerateForm.classGroupIds"
+            class="full-width"
+            multiple
+            filterable
+            collapse-tags
+            collapse-tags-tooltip
+            placeholder="留空代表全部班级"
+          >
+            <el-option
+              v-for="classGroup in state.masterData.classes"
+              :key="classGroup.id"
+              :label="classGroup.name"
+              :value="classGroup.id"
+            />
+          </el-select>
         </el-form-item>
         <el-alert
-          title="当前生成的是周反馈任务，后续会接课表导入后自动匹配本周课程。"
+          title="当前生成的是周反馈任务；班级留空会给全部班级生成，选择班级则只生成所选班级。"
           type="warning"
           :closable="false"
           show-icon
@@ -2183,57 +3014,45 @@ onMounted(initializeAuth);
 
     <el-drawer
       v-model="weeklyFeedbackDrawerVisible"
-      title="学委提交周反馈"
+      :title="isClassRepresentative ? '学委提交周反馈' : '提交课程反馈'"
       size="520px"
     >
       <el-form label-position="top">
-        <el-form-item label="周反馈任务">
-          <el-select v-model="weeklyFeedbackForm.taskId" class="full-width" filterable>
+        <el-form-item label="反馈范围">
+          <el-select
+            v-model="weeklyFeedbackForm.taskId"
+            class="full-width"
+            filterable
+            placeholder="请选择本周反馈任务"
+            @change="syncWeeklyFeedbackTaskSelection"
+          >
             <el-option
-              v-for="task in state.weeklyTasks"
+              v-for="task in weeklyFeedbackTaskOptions"
               :key="task.id"
-              :label="`${task.taskName} / ${task.className}`"
+              :label="task.label"
               :value="task.id"
             />
           </el-select>
         </el-form-item>
         <el-form-item label="课程">
-          <el-select v-model="weeklyFeedbackForm.courseId" class="full-width" filterable>
+          <el-select
+            v-model="weeklyFeedbackForm.courseId"
+            class="full-width"
+            filterable
+            placeholder="只能选择当前周课表中的课程"
+            no-data-text="当前任务没有可反馈课程"
+            @change="syncWeeklyFeedbackCourseSelection"
+          >
             <el-option
-              v-for="course in state.masterData.courses"
-              :key="course.id"
-              :label="course.courseName || course.name"
-              :value="course.id"
+              v-for="course in weeklyFeedbackCourseOptions"
+              :key="`${course.taskId}-${course.courseId}`"
+              :label="course.label"
+              :value="course.courseId"
             />
           </el-select>
         </el-form-item>
-        <el-form-item label="教师">
-          <el-select v-model="weeklyFeedbackForm.teacherId" class="full-width" filterable clearable>
-            <el-option
-              v-for="teacher in state.masterData.teachers"
-              :key="teacher.id"
-              :label="teacher.teacherName"
-              :value="teacher.id"
-            />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="计划授课教师">
-          <el-input v-model="weeklyFeedbackForm.plannedTeacherName" />
-        </el-form-item>
-        <el-form-item label="实际授课教师">
-          <el-input v-model="weeklyFeedbackForm.actualTeacherName" />
-        </el-form-item>
-        <el-form-item label="班级">
-          <el-input v-model="weeklyFeedbackForm.classGroupName" />
-        </el-form-item>
-        <el-form-item label="上课周次">
-          <el-input v-model="weeklyFeedbackForm.weekRange" placeholder="例如：13 或 2-4,8,10,13" />
-        </el-form-item>
-        <el-form-item label="作业考核">
-          <el-input v-model="weeklyFeedbackForm.assignmentAssessment" />
-        </el-form-item>
-        <el-form-item label="辅导方式">
-          <el-input v-model="weeklyFeedbackForm.guidanceMode" />
+        <el-form-item label="授课教师">
+          <el-input v-model="weeklyFeedbackForm.actualTeacherName" disabled placeholder="教师待确认" />
         </el-form-item>
         <el-form-item label="教学效果或收获">
           <el-input
@@ -2242,16 +3061,12 @@ onMounted(initializeAuth);
             :rows="4"
             placeholder="请填写本周课程教学效果、学生收获或整体情况"
           />
-        </el-form-item>
-        <el-form-item label="外教教学内容安排是否合理">
-          <el-input v-model="weeklyFeedbackForm.contentArrangementEval" />
-        </el-form-item>
-        <el-form-item label="共课教师评价">
-          <el-input
-            v-model="weeklyFeedbackForm.coTeacherEvaluation"
-            type="textarea"
-            :rows="3"
-          />
+          <div class="form-tip-row">
+            <span>课程反馈总字数 {{ weeklyFeedbackWordCount }} 字</span>
+            <el-tag :type="weeklyFeedbackWordCount >= 20 ? 'success' : 'warning'" size="small">
+              {{ weeklyFeedbackWordCount >= 20 ? "达到基础质量要求" : "少于20字会被标记为低质量" }}
+            </el-tag>
+          </div>
         </el-form-item>
         <el-form-item label="难点或存在的问题或建议">
           <el-input
@@ -2280,7 +3095,93 @@ onMounted(initializeAuth);
           <el-checkbox v-model="weeklyFeedbackForm.needReply">需要管理员回复</el-checkbox>
         </el-form-item>
         <el-button type="primary" class="full-width" @click="submitWeeklyFeedback">
-          提交周反馈
+          {{ isClassRepresentative ? "提交周反馈" : "提交课程反馈" }}
+        </el-button>
+      </el-form>
+    </el-drawer>
+
+    <el-drawer v-model="userAuthorizationDrawerVisible" title="用户角色与班级授权" size="460px">
+      <el-form label-position="top">
+        <el-form-item label="学校账号">
+          <el-input v-model="userAuthorizationForm.username" disabled />
+        </el-form-item>
+        <el-form-item label="姓名">
+          <el-input v-model="userAuthorizationForm.realName" />
+        </el-form-item>
+        <el-form-item label="角色">
+          <el-select v-model="userAuthorizationForm.role" class="full-width">
+            <el-option label="普通学生" value="STUDENT" />
+            <el-option label="学委" value="CLASS_REPRESENTATIVE" />
+            <el-option label="院系管理员" value="DEPARTMENT_ADMIN" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="班级">
+          <el-select
+            v-model="userAuthorizationForm.classGroupId"
+            class="full-width"
+            clearable
+            filterable
+            placeholder="请选择班级"
+            @change="syncDepartmentFromClass"
+          >
+            <el-option
+              v-for="classGroup in state.masterData.classes"
+              :key="classGroup.id"
+              :label="classGroup.name"
+              :value="classGroup.id"
+            />
+          </el-select>
+          <div class="form-tip-row">
+            <span>
+              {{ selectedAuthorizationClass ? `已选：${selectedAuthorizationClass.name}` : "未选择班级" }}
+            </span>
+            <el-tag v-if="linkedAuthorizationDepartment" type="info" size="small">
+              将自动带出：{{ linkedAuthorizationDepartment.name }}
+            </el-tag>
+          </div>
+        </el-form-item>
+        <el-form-item label="院系">
+          <el-select
+            v-model="userAuthorizationForm.departmentId"
+            class="full-width"
+            clearable
+            filterable
+            placeholder="请选择院系"
+          >
+            <el-option
+              v-for="department in state.masterData.departments"
+              :key="department.id"
+              :label="department.name"
+              :value="department.id"
+            />
+          </el-select>
+          <div class="form-tip-row">
+            <span>
+              {{ selectedAuthorizationDepartment ? `当前院系：${selectedAuthorizationDepartment.name}` : "未选择院系" }}
+            </span>
+            <el-tag v-if="linkedAuthorizationDepartment && selectedAuthorizationDepartment && Number(linkedAuthorizationDepartment.id) === Number(selectedAuthorizationDepartment.id)" type="success" size="small">
+              与班级匹配
+            </el-tag>
+            <el-tag v-else-if="linkedAuthorizationDepartment && selectedAuthorizationDepartment" type="warning" size="small">
+              与班级所属院系不一致
+            </el-tag>
+          </div>
+        </el-form-item>
+        <el-form-item label="账号状态">
+          <el-select v-model="userAuthorizationForm.status" class="full-width">
+            <el-option label="启用" value="ACTIVE" />
+            <el-option label="禁用" value="DISABLED" />
+          </el-select>
+        </el-form-item>
+        <el-alert
+          class="section-alert"
+          title="学委仍然使用学校账号登录；这里仅给已实名认证的学生账号增加本地角色和班级授权。"
+          type="info"
+          :closable="false"
+          show-icon
+        />
+        <el-button type="primary" class="full-width" @click="submitUserAuthorization">
+          保存授权
         </el-button>
       </el-form>
     </el-drawer>

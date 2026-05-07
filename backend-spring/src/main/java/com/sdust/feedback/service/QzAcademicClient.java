@@ -32,6 +32,12 @@ import org.springframework.stereotype.Service;
 
 @Service
 public class QzAcademicClient {
+  private static final List<String> COURSE_EXTENSION_ACADEMY_CODES = List.of(
+      "01", "28", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", "13", "14", "15",
+      "17", "18", "PhQE28KhTP", "Yj2nYWDjrk", "ht2BRbfav4", "Z6W2gIlpvT", "S7UBoRsYh8", "gRfuiTf6pW",
+      "3imp6XGwLV", "2205", "2206", "2207", "2208", "0301", "0302", "0303", "3005", "mDfrmdupC0"
+  );
+
   private final ObjectMapper objectMapper;
   private final String baseUrl;
   private final String webBaseUrl;
@@ -76,20 +82,7 @@ public class QzAcademicClient {
       throw new IllegalArgumentException("请填写教务账号和密码");
     }
 
-    Map<String, String> authParams = orderedParams();
-    authParams.put("method", "authUser");
-    authParams.put("xh", account);
-    authParams.put("pwd", password);
-    Map<String, Object> auth = get(authParams, appHeaders(), "教务登录 authUser");
-    String token = text(auth.get("token"));
-    String flag = text(auth.get("flag"));
-    String success = text(auth.get("success"));
-    if (token.isBlank() || ("0".equals(flag) && success.isBlank())) {
-      throw new IllegalArgumentException("教务认证失败，请检查账号密码或接口状态");
-    }
-
-    HttpHeaders headers = appHeaders();
-    headers.set("token", token);
+    HttpHeaders headers = authenticateAppApi(account, password, "教务登录 authUser");
 
     Map<String, String> currentTimeParams = orderedParams();
     currentTimeParams.put("method", "getCurrentTime");
@@ -121,6 +114,36 @@ public class QzAcademicClient {
     }
 
     return new SyncResult(termCode, weekNo, rows, rawRows.size());
+  }
+
+  public Map<String, Object> readStudentProfileFromAppApi(Map<String, Object> request) {
+    String account = text(request.get("account"));
+    String password = text(request.get("password"));
+    if (account.isBlank() || password.isBlank()) {
+      throw new IllegalArgumentException("请填写教务账号和密码");
+    }
+
+    HttpHeaders headers = authenticateAppApi(account, password, "教务登录 authUser");
+    Map<String, String> params = orderedParams();
+    params.put("method", "getUserInfo");
+    params.put("xh", account);
+    Object raw = getRaw(params, headers, "获取学生基础信息 getUserInfo");
+    return normalizeStudentProfile(raw);
+  }
+
+  public Map<String, Object> readStudentProfileFromWebSession(String academicSessionId) {
+    AcademicSession session = requireAcademicSession(academicSessionId);
+    String profileUrl = webBaseUrl + "grxx/xsxx";
+    HttpPayload payload = doGetUrl(profileUrl, orderedParams(), formHeaders(session.cookie, webBaseUrl), false);
+    String html = payload.text();
+    if (isLoginOrGatewayPage(html, payload.statusCode)) {
+      throw new IllegalArgumentException("个人信息页面返回登录页或网关页，无法从 HTML 识别专业。返回片段：" + preview(html));
+    }
+    Map<String, Object> profile = parseStudentProfileHtml(html);
+    if (profile.isEmpty()) {
+      throw new IllegalArgumentException("个人信息 HTML 没有解析到姓名、学号、学院、专业或班级字段。返回片段：" + preview(html));
+    }
+    return profile;
   }
 
   public SyncResult loginAndReadPersonalTimetable(Map<String, Object> request) {
@@ -178,6 +201,29 @@ public class QzAcademicClient {
     return session != null && session.account.equals(account) && session.expiresAt.isAfter(Instant.now());
   }
 
+  public Map<String, Object> diagnoseAcademicSession(Map<String, Object> request) {
+    String academicSessionId = text(request.get("academicSessionId"));
+    String termCode = firstText(request, "termCode", "xnxqid");
+    String weekNo = firstText(request, "weekNo", "zc");
+    if (termCode.isBlank()) {
+      termCode = currentTermCode;
+    }
+    if (weekNo.isBlank()) {
+      weekNo = String.valueOf(currentWeekNo());
+    }
+    AcademicSession academicSession = requireAcademicSession(academicSessionId);
+
+    Map<String, Object> result = new LinkedHashMap<>();
+    result.put("termCode", termCode);
+    result.put("weekNo", weekNo);
+    result.put("sessionCookie", cookieSummary(academicSession.cookie));
+    result.put("timetable", diagnoseTimetable(academicSession.cookie, termCode, weekNo));
+    result.put("grades", diagnoseGrades(academicSession.cookie, termCode));
+    result.put("appApi", diagnoseAppApi(request, academicSession.account, termCode, weekNo));
+    result.put("conclusion", buildDiagnosisConclusion(result));
+    return result;
+  }
+
   public Map<String, Object> queryGrades(Map<String, Object> request) {
     String academicSessionId = text(request.get("academicSessionId"));
     String requestedTermCode = firstText(request, "termCode", "xnxqid");
@@ -195,7 +241,10 @@ public class QzAcademicClient {
     // Mimic SHST flow: open grade page first, then request grade list.
     // Some QZ deployments refresh route cookies on the query page.
     String gradeCookie = academicSession.cookie;
-    HttpPayload queryPayload = doGetUrl(webBaseUrl + "kscj/cjcx_query", orderedParams(), formHeaders(gradeCookie));
+    String gradeQueryUrl = webBaseUrl + "kscj/cjcx_query";
+    String gradeListNewUrl = webBaseUrl + "kscj/cjcx_list_new";
+    String gradeListUrl = webBaseUrl + "kscj/cjcx_list";
+    HttpPayload queryPayload = doGetUrl(gradeQueryUrl, orderedParams(), formHeaders(gradeCookie, webBaseUrl));
     gradeCookie = mergeCookie(gradeCookie, queryPayload.cookie);
 
     Map<String, String> gradeParams = orderedParams();
@@ -205,26 +254,20 @@ public class QzAcademicClient {
     gradeParams.put("kcxz", "");
     gradeParams.put("kcmc", "");
 
-    HttpPayload gradePayload = doPostUrl(webBaseUrl + "kscj/cjcx_list_new", gradeParams, formHeaders(gradeCookie), false);
+    HttpPayload gradePayload = doPostUrl(gradeListNewUrl, gradeParams, formHeaders(gradeCookie, gradeQueryUrl), false);
     String gradeHtml = gradePayload.text();
     List<Map<String, Object>> grades = parseGradeHtml(gradeHtml);
     if (grades.isEmpty() && (gradePayload.statusCode == 302 || gradeHtml.isBlank())) {
       // Compatibility fallback for some deployments.
       gradeCookie = mergeCookie(gradeCookie, gradePayload.cookie);
-      HttpPayload fallbackPayload = doPostUrl(webBaseUrl + "kscj/cjcx_list", gradeParams, formHeaders(gradeCookie), false);
+      HttpPayload fallbackPayload = doPostUrl(gradeListUrl, gradeParams, formHeaders(gradeCookie, gradeQueryUrl), false);
       gradeHtml = fallbackPayload.text();
       grades = parseGradeHtml(gradeHtml);
       gradePayload = fallbackPayload;
     }
-    if (grades.isEmpty() && isLoginOrGatewayPage(gradeHtml, gradePayload.statusCode)) {
-      if (!password.isBlank()) {
-        return queryGradesFromAppApi(academicSession.account, password, requestedTermCode, academicSessionId);
-      }
-      throw new IllegalArgumentException("教务登录成功，但成绩接口会话失效，请重新学校账号登录后重试。");
-    }
-
     if (grades.isEmpty() && !requestedTermCode.isBlank()) {
-      // Some deployments return empty for an unsupported term code. Retry once with all terms.
+      // SDUST's current term endpoint may be intercepted while the all-term query works.
+      // Try all terms before falling back to app.do or reporting a lost web session.
       Map<String, String> allTermParams = orderedParams();
       allTermParams.put("kksj", "");
       allTermParams.put("xsfs", "all");
@@ -232,19 +275,29 @@ public class QzAcademicClient {
       allTermParams.put("kcxz", "");
       allTermParams.put("kcmc", "");
       gradeCookie = mergeCookie(gradeCookie, gradePayload.cookie);
-      HttpPayload retryPayload = doPostUrl(webBaseUrl + "kscj/cjcx_list_new", allTermParams, formHeaders(gradeCookie), false);
+      HttpPayload retryPayload = doPostUrl(gradeListNewUrl, allTermParams, formHeaders(gradeCookie, gradeQueryUrl), false);
       String retryHtml = retryPayload.text();
       List<Map<String, Object>> retryGrades = parseGradeHtml(retryHtml);
       if (retryGrades.isEmpty() && (retryPayload.statusCode == 302 || retryHtml.isBlank())) {
         gradeCookie = mergeCookie(gradeCookie, retryPayload.cookie);
-        HttpPayload retryFallbackPayload = doPostUrl(webBaseUrl + "kscj/cjcx_list", allTermParams, formHeaders(gradeCookie), false);
+        HttpPayload retryFallbackPayload = doPostUrl(gradeListUrl, allTermParams, formHeaders(gradeCookie, gradeQueryUrl), false);
         retryHtml = retryFallbackPayload.text();
         retryGrades = parseGradeHtml(retryHtml);
+        retryPayload = retryFallbackPayload;
       }
       if (!retryGrades.isEmpty()) {
         grades = retryGrades;
         termCode = "";
+        gradeHtml = retryHtml;
+        gradePayload = retryPayload;
       }
+    }
+
+    if (grades.isEmpty() && isLoginOrGatewayPage(gradeHtml, gradePayload.statusCode)) {
+      if (!password.isBlank()) {
+        return queryGradesFromAppApi(academicSession.account, password, requestedTermCode, academicSessionId);
+      }
+      throw new IllegalArgumentException("教务登录成功，但成绩接口会话失效，请重新学校账号登录后重试。");
     }
 
     if (grades.isEmpty()
@@ -404,20 +457,25 @@ public class QzAcademicClient {
     String usedParams = "";
     List<String> attemptDiagnostics = new ArrayList<>();
     List<Map<String, Object>> rawRows = Collections.emptyList();
-    for (Map<String, String> timetableParams : timetableParamAttempts) {
-      HttpPayload timetablePayload = doGetUrl(webBaseUrl + "xskb/xskb_list.do", timetableParams, formHeaders(academicSession.cookie));
-      timetableHtml = timetablePayload.text();
-      usedParams = "GET " + timetableParams;
-      rawRows = parseTimetableHtml(timetableHtml, weekNo, resolvedClassName);
-      attemptDiagnostics.add(timetableAttemptSummary(usedParams, timetableHtml, rawRows.size()));
-      if (!rawRows.isEmpty()) {
-        break;
+    for (String timetableUrl : timetableUrlVariants()) {
+      for (Map<String, String> timetableParams : timetableParamAttempts) {
+        HttpPayload timetablePayload = doGetUrl(timetableUrl, timetableParams, formHeaders(academicSession.cookie, timetableUrl));
+        timetableHtml = timetablePayload.text();
+        usedParams = "GET " + timetableUrl + " " + timetableParams;
+        rawRows = parseTimetableHtml(timetableHtml, weekNo, resolvedClassName);
+        attemptDiagnostics.add(timetableAttemptSummary(usedParams, timetableHtml, rawRows.size()));
+        if (!rawRows.isEmpty()) {
+          break;
+        }
+        HttpPayload postPayload = doPostUrl(timetableUrl, timetableParams, formHeaders(academicSession.cookie, timetableUrl), true);
+        timetableHtml = postPayload.text();
+        usedParams = "POST " + timetableUrl + " " + timetableParams;
+        rawRows = parseTimetableHtml(timetableHtml, weekNo, resolvedClassName);
+        attemptDiagnostics.add(timetableAttemptSummary(usedParams, timetableHtml, rawRows.size()));
+        if (!rawRows.isEmpty()) {
+          break;
+        }
       }
-      HttpPayload postPayload = doPostUrl(webBaseUrl + "xskb/xskb_list.do", timetableParams, formHeaders(academicSession.cookie), true);
-      timetableHtml = postPayload.text();
-      usedParams = "POST " + timetableParams;
-      rawRows = parseTimetableHtml(timetableHtml, weekNo, resolvedClassName);
-      attemptDiagnostics.add(timetableAttemptSummary(usedParams, timetableHtml, rawRows.size()));
       if (!rawRows.isEmpty()) {
         break;
       }
@@ -445,6 +503,9 @@ public class QzAcademicClient {
     List<Map<String, Object>> rows = new ArrayList<>();
     for (Map<String, Object> raw : rawRows) {
       rows.addAll(normalizeCourses(raw, weekNo, fallbackClassName));
+    }
+    if (!"false".equalsIgnoreCase(text(request.get("enrichTeachers")))) {
+      enrichMissingTeachersFromCourseExtension(rows, termCode, academicSession.cookie);
     }
     return new SyncResult(termCode, weekNo, rows, rawRows.size(), academicSessionId);
   }
@@ -512,6 +573,23 @@ public class QzAcademicClient {
     throw new IllegalArgumentException("教务接口返回格式异常");
   }
 
+  private HttpHeaders authenticateAppApi(String account, String password, String stage) {
+    Map<String, String> authParams = orderedParams();
+    authParams.put("method", "authUser");
+    authParams.put("xh", account);
+    authParams.put("pwd", password);
+    Map<String, Object> auth = get(authParams, appHeaders(), stage);
+    String token = text(auth.get("token"));
+    String flag = text(auth.get("flag"));
+    String success = text(auth.get("success"));
+    if (token.isBlank() || ("0".equals(flag) && success.isBlank())) {
+      throw new IllegalArgumentException("教务认证失败，请检查账号密码或接口状态");
+    }
+    HttpHeaders headers = appHeaders();
+    headers.set("token", token);
+    return headers;
+  }
+
   private Object getRaw(Map<String, String> params, HttpHeaders headers, String stage) {
     return parseJson(doGet(params, headers), stage);
   }
@@ -556,6 +634,17 @@ public class QzAcademicClient {
     return builder.toString();
   }
 
+  private String urlWithQuery(String urlValue, Map<String, String> params) {
+    String query = queryString(params);
+    if (query.isBlank()) {
+      return urlValue;
+    }
+    if (urlValue.contains("?")) {
+      return urlValue + "&" + query.substring(1);
+    }
+    return urlValue + query;
+  }
+
   private HttpPayload doGetUrl(String urlValue, Map<String, String> params, HttpHeaders headers) {
     return doGetUrl(urlValue, params, headers, true);
   }
@@ -563,7 +652,7 @@ public class QzAcademicClient {
   private HttpPayload doGetUrl(String urlValue, Map<String, String> params, HttpHeaders headers, boolean followRedirect) {
     HttpURLConnection connection = null;
     try {
-      URL url = new URL(urlValue + queryString(params));
+      URL url = new URL(urlWithQuery(urlValue, params));
       connection = (HttpURLConnection) url.openConnection();
       connection.setInstanceFollowRedirects(followRedirect);
       connection.setRequestMethod("GET");
@@ -596,7 +685,6 @@ public class QzAcademicClient {
       connection.setReadTimeout(60000);
       connection.setDoOutput(true);
       applyHeaders(connection, headers);
-      connection.setRequestProperty("Referer", webBaseUrl);
       connection.setRequestProperty("Origin", "https://jwgl.sdust.edu.cn");
       byte[] body = formBody(params).getBytes(StandardCharsets.UTF_8);
       connection.getOutputStream().write(body);
@@ -779,12 +867,31 @@ public class QzAcademicClient {
     List<Map<String, Object>> rows = new ArrayList<>();
     if (containsClassToken(source, "kbcontent1")) {
       rows.addAll(parseGroupedTimetableCells(source, weekNo, fallbackClassName));
+      if (rows.isEmpty()) {
+        rows.addAll(parseLinearTimetableCells(source, weekNo, fallbackClassName, "kbcontent1"));
+      }
     }
     if (!rows.isEmpty()) {
       return rows;
     }
 
     Matcher matcher = divClassMatcher(source, "kbcontent");
+    int index = 0;
+    while (matcher.find()) {
+      rows.addAll(parseTimetableCell(matcher.group(1), weekNo, fallbackClassName, index % 7, index / 7));
+      index += 1;
+    }
+    return rows;
+  }
+
+  private List<String> timetableUrlVariants() {
+    String url = webBaseUrl + "xskb/xskb_list.do";
+    return List.of(url, url + "?Ves632DSdyV=NEW_XSD_PYGL");
+  }
+
+  private List<Map<String, Object>> parseLinearTimetableCells(String html, String weekNo, String fallbackClassName, String className) {
+    List<Map<String, Object>> rows = new ArrayList<>();
+    Matcher matcher = divClassMatcher(html, className);
     int index = 0;
     while (matcher.find()) {
       rows.addAll(parseTimetableCell(matcher.group(1), weekNo, fallbackClassName, index % 7, index / 7));
@@ -842,6 +949,467 @@ public class QzAcademicClient {
     return cells;
   }
 
+  private List<Map<String, Object>> diagnoseTimetable(String cookie, String termCode, String weekNo) {
+    List<Map<String, String>> attempts = new ArrayList<>();
+    Map<String, String> shstParams = orderedParams();
+    shstParams.put("week", weekNo);
+    shstParams.put("term", termCode);
+    attempts.add(shstParams);
+    Map<String, String> qzParams = orderedParams();
+    qzParams.put("zc", weekNo);
+    qzParams.put("xnxq01id", termCode);
+    attempts.add(qzParams);
+    attempts.add(orderedParams());
+
+    List<Map<String, Object>> diagnostics = new ArrayList<>();
+    for (String timetableUrl : timetableUrlVariants()) {
+      for (Map<String, String> params : attempts) {
+        diagnostics.add(diagnoseHtmlEndpoint("GET", timetableUrl, params, cookie, "timetable", timetableUrl));
+        diagnostics.add(diagnoseHtmlEndpoint("POST", timetableUrl, params, cookie, "timetable", timetableUrl));
+      }
+    }
+    return diagnostics;
+  }
+
+  private List<Map<String, Object>> diagnoseGrades(String cookie, String termCode) {
+    List<Map<String, Object>> diagnostics = new ArrayList<>();
+    String gradeQueryUrl = webBaseUrl + "kscj/cjcx_query";
+    String gradeCookie = cookie;
+    Map<String, String> queryParams = orderedParams();
+    try {
+      HttpPayload queryPayload = requestHtmlEndpoint("GET", gradeQueryUrl, queryParams, gradeCookie, webBaseUrl);
+      diagnostics.add(describeHtmlEndpoint("GET", gradeQueryUrl, queryParams, queryPayload, "grades", webBaseUrl));
+      gradeCookie = mergeCookie(gradeCookie, queryPayload.cookie);
+    } catch (IllegalArgumentException error) {
+      Map<String, Object> item = new LinkedHashMap<>();
+      item.put("method", "GET");
+      item.put("url", gradeQueryUrl);
+      item.put("params", queryParams.toString());
+      item.put("error", error.getMessage());
+      diagnostics.add(item);
+    }
+    Map<String, String> params = orderedParams();
+    params.put("kksj", termCode);
+    params.put("kcxz", "");
+    params.put("kcmc", "");
+    params.put("xsfs", "all");
+    params.put("showType", "2");
+    diagnostics.add(diagnoseHtmlEndpoint("POST", webBaseUrl + "kscj/cjcx_list_new", params, gradeCookie, "grades", gradeQueryUrl));
+    diagnostics.add(diagnoseHtmlEndpoint("POST", webBaseUrl + "kscj/cjcx_list", params, gradeCookie, "grades", gradeQueryUrl));
+    Map<String, String> allTermParams = orderedParams();
+    allTermParams.put("kksj", "");
+    allTermParams.put("kcxz", "");
+    allTermParams.put("kcmc", "");
+    allTermParams.put("xsfs", "all");
+    allTermParams.put("showType", "2");
+    diagnostics.add(diagnoseHtmlEndpoint("POST", webBaseUrl + "kscj/cjcx_list_new", allTermParams, gradeCookie, "grades", gradeQueryUrl));
+    return diagnostics;
+  }
+
+  private Map<String, Object> diagnoseHtmlEndpoint(
+      String method,
+      String url,
+      Map<String, String> params,
+      String cookie,
+      String parserType,
+      String referer
+  ) {
+    Map<String, Object> item = new LinkedHashMap<>();
+    item.put("method", method);
+    item.put("url", url);
+    item.put("params", params.toString());
+    try {
+      return describeHtmlEndpoint(method, url, params, requestHtmlEndpoint(method, url, params, cookie, referer), parserType, referer);
+    } catch (IllegalArgumentException error) {
+      item.put("error", error.getMessage());
+    }
+    return item;
+  }
+
+  private HttpPayload requestHtmlEndpoint(
+      String method,
+      String url,
+      Map<String, String> params,
+      String cookie,
+      String referer
+  ) {
+    return "POST".equals(method)
+        ? doPostUrl(url, params, formHeaders(cookie, referer), false)
+        : doGetUrl(url, params, formHeaders(cookie, referer), false);
+  }
+
+  private Map<String, Object> describeHtmlEndpoint(
+      String method,
+      String url,
+      Map<String, String> params,
+      HttpPayload payload,
+      String parserType,
+      String referer
+  ) {
+    Map<String, Object> item = new LinkedHashMap<>();
+    String html = payload.text();
+    item.put("method", method);
+    item.put("url", url);
+    item.put("params", params.toString());
+    item.put("statusCode", payload.statusCode);
+    item.put("location", payload.location);
+    item.put("setCookie", cookieSummary(payload.cookie));
+    item.put("referer", referer);
+    item.put("loginOrGateway", isLoginOrGatewayPage(html, payload.statusCode));
+    item.put("hasKbtable", html.toLowerCase().contains("kbtable"));
+    item.put("kbcontentCount", countMatches(html.toLowerCase(), "kbcontent"));
+    item.put("kbcontentExactCount", countClassMatches(html, "kbcontent"));
+    item.put("kbcontent1Count", countClassMatches(html, "kbcontent1"));
+    item.put("hasDataList", html.toLowerCase().contains("datalist"));
+    if ("grades".equals(parserType)) {
+      List<Map<String, Object>> grades = parseGradeHtml(html);
+      item.put("parsedCount", grades.size());
+      item.put("gradeTableDebug", gradeTableDebug(html));
+      item.put("preview", previewAroundElement(html, "dataList"));
+    } else {
+      List<Map<String, Object>> rows = parseTimetableHtml(html, text(params.getOrDefault("week", params.getOrDefault("zc", ""))), "");
+      item.put("parsedCount", rows.size());
+      item.put("firstRow", rows.isEmpty() ? null : rows.get(0));
+      item.put("nonEmptyKbcontentCount", nonEmptyClassContentCount(html, "kbcontent"));
+      item.put("nonEmptyKbcontent1Count", nonEmptyClassContentCount(html, "kbcontent1"));
+      item.put("sampleTimetableCells", sampleClassContents(html, "kbcontent1", 3));
+      item.put("preview", previewAroundTimetable(html));
+    }
+    return item;
+  }
+
+  private Map<String, Object> diagnoseAppApi(Map<String, Object> request, String account, String termCode, String weekNo) {
+    Map<String, Object> item = new LinkedHashMap<>();
+    String password = text(request.get("password"));
+    item.put("enabled", !password.isBlank());
+    if (password.isBlank()) {
+      item.put("message", "未提供密码，跳过 app.do 诊断");
+      return item;
+    }
+    try {
+      Map<String, String> authParams = orderedParams();
+      authParams.put("method", "authUser");
+      authParams.put("xh", account);
+      authParams.put("pwd", password);
+      Object authRaw = getRaw(authParams, appHeaders(), "诊断 app.do authUser");
+      Map<String, Object> auth = authRaw instanceof Map ? castMap((Map<?, ?>) authRaw) : new LinkedHashMap<>();
+      item.put("authKeys", auth.keySet().toString());
+      item.put("authFlag", firstText(auth, "flag", "success"));
+      item.put("hasToken", !text(auth.get("token")).isBlank());
+      if (!text(auth.get("token")).isBlank()) {
+        HttpHeaders headers = appHeaders();
+        headers.set("token", text(auth.get("token")));
+        Map<String, String> timetableParams = orderedParams();
+        timetableParams.put("method", "getKbcxAzc");
+        timetableParams.put("xnxqid", termCode);
+        timetableParams.put("zc", weekNo);
+        timetableParams.put("xh", account);
+        List<Map<String, Object>> timetable = extractRows(getRaw(timetableParams, headers, "诊断 app.do getKbcxAzc"));
+        item.put("timetableRawCount", timetable.size());
+        item.put("timetableFirstRow", timetable.isEmpty() ? null : timetable.get(0));
+        Map<String, String> gradeParams = orderedParams();
+        gradeParams.put("method", "getCjcx");
+        gradeParams.put("xh", account);
+        gradeParams.put("xnxqid", termCode);
+        List<Map<String, Object>> grades = extractRows(getRaw(gradeParams, headers, "诊断 app.do getCjcx"));
+        item.put("gradeRawCount", grades.size());
+        item.put("gradeFirstRow", grades.isEmpty() ? null : grades.get(0));
+      }
+    } catch (IllegalArgumentException error) {
+      item.put("error", error.getMessage());
+    }
+    return item;
+  }
+
+  private String buildDiagnosisConclusion(Map<String, Object> diagnosis) {
+    List<Map<String, Object>> timetable = castObjectList(diagnosis.get("timetable"));
+    List<Map<String, Object>> grades = castObjectList(diagnosis.get("grades"));
+    boolean timetableGateway = allAttemptsGateway(timetable);
+    boolean timetableParsed = anyParsed(timetable);
+    boolean timetableHtmlReturned = anyTrue(timetable, "hasKbtable");
+    boolean gradeQueryPageOk = grades.stream()
+        .anyMatch(item -> "GET".equals(text(item.get("method"))) && Boolean.FALSE.equals(item.get("loginOrGateway")));
+    boolean gradeListGateway = grades.stream()
+        .anyMatch(item -> "POST".equals(text(item.get("method"))) && Boolean.TRUE.equals(item.get("loginOrGateway")));
+    boolean gradeParsed = anyParsed(grades);
+    boolean gradeHtmlReturned = anyTrue(grades, "hasDataList");
+    if (timetableParsed && gradeParsed) {
+      return "课表和成绩都已返回可解析业务数据；若页面显示仍错，根因在前端渲染或字段映射。";
+    }
+    if (timetableHtmlReturned && !timetableParsed && gradeHtmlReturned && !gradeParsed) {
+      return "课表表格和成绩表格都已返回，但均未解析出记录；根因在页面结构适配，需要查看 gradeTableDebug 和 sampleTimetableCells。";
+    }
+    if (timetableHtmlReturned && !timetableParsed) {
+      return "课表表格已返回但没有解析出课程；根因在课表 HTML 结构适配，重点看 nonEmptyKbcontentCount 和 sampleTimetableCells。";
+    }
+    if (gradeHtmlReturned && !gradeParsed) {
+      return "成绩 dataList 已返回但没有解析出成绩；根因在成绩表格结构或该学期为空，重点看 gradeTableDebug。";
+    }
+    if (timetableGateway && gradeListGateway) {
+      return "网页登录本身成功，但课表页和成绩列表页均被登录页/网关拦截；根因优先查网页会话维持、Referer、跳转链和 Cookie 合并。";
+    }
+    if (gradeQueryPageOk && gradeListGateway) {
+      return "成绩查询首页能打开，但成绩列表 POST 被登录页/网关拦截；根因在成绩列表请求链路，不是成绩解析器。";
+    }
+    if (timetableGateway) {
+      return "成绩链路至少有业务页返回，但课表页被登录页/网关拦截；根因在课表页请求链路，不是课表解析器。";
+    }
+    return "至少有接口返回业务页面；若解析仍错，根因在页面结构解析或字段缺失。";
+  }
+
+  private boolean allAttemptsGateway(List<Map<String, Object>> attempts) {
+    return !attempts.isEmpty() && attempts.stream().allMatch(item -> Boolean.TRUE.equals(item.get("loginOrGateway")));
+  }
+
+  private boolean anyParsed(List<Map<String, Object>> attempts) {
+    return attempts.stream().anyMatch(item -> parseInt(text(item.get("parsedCount")), 0) > 0);
+  }
+
+  private boolean anyTrue(List<Map<String, Object>> attempts, String key) {
+    return attempts.stream().anyMatch(item -> Boolean.TRUE.equals(item.get(key)));
+  }
+
+  private List<Map<String, Object>> castObjectList(Object value) {
+    if (value instanceof List) {
+      return castList((List<?>) value);
+    }
+    return Collections.emptyList();
+  }
+
+  private void enrichMissingTeachersFromCourseExtension(List<Map<String, Object>> rows, String termCode, String cookie) {
+    if (rows.stream().noneMatch(this::teacherMissing)) {
+      return;
+    }
+    List<Map<String, Object>> targets = rows.stream().filter(this::teacherMissing).collect(java.util.stream.Collectors.toList());
+    Map<Map<String, Object>, Map<String, Object>> debugByRow = new LinkedHashMap<>();
+    for (Map<String, Object> row : targets) {
+      Map<String, Object> debug = new LinkedHashMap<>();
+      debug.put("targetCourse", text(row.get("courseName")));
+      debug.put("targetClassroom", firstText(row, "classroom", "locationText"));
+      debug.put("targetDay", row.get("day"));
+      debug.put("targetSerial", row.get("serial"));
+      debug.put("scannedAcademies", 0);
+      debug.put("academiesWithRows", 0);
+      debug.put("totalExtensionRows", 0);
+      debug.put("courseCandidateSamples", new ArrayList<Map<String, Object>>());
+      debug.put("errors", new ArrayList<String>());
+      debugByRow.put(row, debug);
+      row.put("teacherExtensionDebug", debug);
+    }
+    for (String academyCode : COURSE_EXTENSION_ACADEMY_CODES) {
+      Map<String, String> params = orderedParams();
+      params.put("xnxqh", termCode);
+      params.put("skyx", academyCode);
+      params.put("kkyx", "");
+      params.put("zzdKcSX", "");
+      params.put("zc1", "");
+      params.put("zc2", "");
+      params.put("jc1", "");
+      params.put("jc2", "");
+      debugByRow.values().forEach(debug -> debug.put("scannedAcademies", parseInt(text(debug.get("scannedAcademies")), 0) + 1));
+      try {
+        String extensionUrl = webBaseUrl + "kbcx/kbxx_kc_ifr";
+        HttpPayload payload = doPostUrl(extensionUrl, params, formHeaders(cookie, extensionUrl), true);
+        List<Map<String, Object>> extensionRows = parseCourseExtensionHtml(payload.text());
+        if (extensionRows.isEmpty()) {
+          continue;
+        }
+        debugByRow.values().forEach(debug -> {
+          debug.put("academiesWithRows", parseInt(text(debug.get("academiesWithRows")), 0) + 1);
+          debug.put("totalExtensionRows", parseInt(text(debug.get("totalExtensionRows")), 0) + extensionRows.size());
+        });
+        for (Map<String, Object> row : rows) {
+          if (!teacherMissing(row)) {
+            continue;
+          }
+          collectCourseExtensionSamples(row, extensionRows, academyCode);
+          Map<String, Object> matched = findCourseExtensionMatch(row, extensionRows);
+          if (matched == null) {
+            continue;
+          }
+          row.put("teacherExtensionMatchedRow", matched);
+          String teacher = firstText(matched, "teacher");
+          if (!teacher.isBlank()) {
+            row.put("teacherName", teacher);
+            row.put("plannedTeacherName", teacher);
+            row.put("actualTeacherName", teacher);
+            row.put("teacherMissingReason", "");
+            row.put("teacherRootCause", "");
+            row.put("teacherSource", "course-extension:" + academyCode);
+          }
+          if (text(row.get("classroom")).isBlank()) {
+            String classroom = firstText(matched, "classroom");
+            if (!classroom.isBlank()) {
+              row.put("classroom", classroom);
+              row.put("locationText", classroom);
+            }
+          }
+        }
+        if (rows.stream().noneMatch(this::teacherMissing)) {
+          return;
+        }
+      } catch (IllegalArgumentException error) {
+        for (Map<String, Object> debug : debugByRow.values()) {
+          @SuppressWarnings("unchecked")
+          List<String> errors = (List<String>) debug.get("errors");
+          if (errors.size() < 5) {
+            errors.add(academyCode + ": " + error.getMessage());
+          }
+        }
+      }
+    }
+    for (Map<String, Object> row : targets) {
+      if (!teacherMissing(row)) {
+        continue;
+      }
+      Map<String, Object> debug = debugByRow.get(row);
+      int sampleCount = debug == null ? 0 : ((List<?>) debug.get("courseCandidateSamples")).size();
+      String suffix = sampleCount > 0
+          ? "扩展课表找到同名/近似课程样本，但未能匹配出教师，详情见 teacherExtensionDebug。"
+          : "扩展课表未找到同名课程样本，可能该课不在扩展课表公开范围、学院代码不匹配，或学校未返回该课程教师。";
+      row.put("teacherMissingReason", "个人课表HTML未返回教师字段，扩展课表反查失败");
+      row.put("teacherRootCause", text(row.get("teacherRootCause")) + suffix);
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  private void collectCourseExtensionSamples(Map<String, Object> target, List<Map<String, Object>> candidates, String academyCode) {
+    Object debugValue = target.get("teacherExtensionDebug");
+    if (!(debugValue instanceof Map)) {
+      return;
+    }
+    Map<String, Object> debug = castMap((Map<?, ?>) debugValue);
+    List<Map<String, Object>> samples = (List<Map<String, Object>>) debug.get("courseCandidateSamples");
+    if (samples == null || samples.size() >= 8) {
+      return;
+    }
+    String targetCourse = normalizeMatchText(text(target.get("courseName")));
+    for (Map<String, Object> candidate : candidates) {
+      String candidateCourse = normalizeMatchText(text(candidate.get("courseName")));
+      if (!candidateCourse.contains(targetCourse) && !targetCourse.contains(candidateCourse)) {
+        continue;
+      }
+      Map<String, Object> sample = new LinkedHashMap<>();
+      sample.put("academyCode", academyCode);
+      sample.put("courseName", candidate.get("courseName"));
+      sample.put("teacher", candidate.get("teacher"));
+      sample.put("classroom", candidate.get("classroom"));
+      sample.put("day", candidate.get("day"));
+      sample.put("serial", candidate.get("serial"));
+      sample.put("debugLines", candidate.get("debugLines"));
+      samples.add(sample);
+      if (samples.size() >= 8) {
+        return;
+      }
+    }
+  }
+
+  private boolean teacherMissing(Map<String, Object> row) {
+    return text(row.get("teacherName")).isBlank() && text(row.get("teacher")).isBlank();
+  }
+
+  private Map<String, Object> findCourseExtensionMatch(Map<String, Object> target, List<Map<String, Object>> candidates) {
+    String targetCourse = normalizeMatchText(text(target.get("courseName")));
+    String targetClassroom = normalizeMatchText(firstText(target, "classroom", "locationText"));
+    int targetDay = parseInt(text(target.get("day")), -1);
+    int targetSerial = parseInt(text(target.get("serial")), -1);
+    Map<String, Object> fallback = null;
+    for (Map<String, Object> candidate : candidates) {
+      if (!normalizeMatchText(text(candidate.get("courseName"))).contains(targetCourse)
+          && !targetCourse.contains(normalizeMatchText(text(candidate.get("courseName"))))) {
+        continue;
+      }
+      if (targetDay >= 0 && parseInt(text(candidate.get("day")), -2) != targetDay) {
+        continue;
+      }
+      if (targetSerial >= 0 && parseInt(text(candidate.get("serial")), -2) != targetSerial) {
+        continue;
+      }
+      if (!targetClassroom.isBlank()) {
+        String candidateClassroom = normalizeMatchText(firstText(candidate, "classroom"));
+        if (candidateClassroom.equals(targetClassroom)) {
+          return candidate;
+        }
+        if (fallback == null) {
+          fallback = candidate;
+        }
+        continue;
+      }
+      return candidate;
+    }
+    return fallback;
+  }
+
+  private List<Map<String, Object>> parseCourseExtensionHtml(String html) {
+    String tableHtml = extractTableById(html, "kbtable");
+    String source = tableHtml.isBlank() ? html : tableHtml;
+    List<Map<String, Object>> rows = new ArrayList<>();
+    Matcher rowMatcher = Pattern.compile("<tr\\b[\\s\\S]*?>([\\s\\S]*?)</tr>", Pattern.CASE_INSENSITIVE).matcher(source);
+    int rowIndex = 0;
+    while (rowMatcher.find()) {
+      if (rowIndex < 2) {
+        rowIndex += 1;
+        continue;
+      }
+      List<String> cells = extractCells(rowMatcher.group(1));
+      if (cells.size() < 2) {
+        rowIndex += 1;
+        continue;
+      }
+      String groupCourseName = stripHtml(cells.get(0));
+      for (int index = 1; index < cells.size(); index += 1) {
+        int courseIndex = index - 1;
+        int day = courseIndex / 5;
+        int serial = courseIndex % 5;
+        Matcher contentMatcher = divClassMatcher(cells.get(index), "kbcontent1");
+        while (contentMatcher.find()) {
+          rows.addAll(parseCourseExtensionCell(contentMatcher.group(1), groupCourseName, day, serial));
+        }
+      }
+      rowIndex += 1;
+    }
+    return rows;
+  }
+
+  private List<Map<String, Object>> parseCourseExtensionCell(String cell, String groupCourseName, int day, int serial) {
+    List<Map<String, Object>> rows = new ArrayList<>();
+    Matcher contentMatcher = divClassMatcher(cell, "kbcontent1");
+    if (contentMatcher.find()) {
+      cell = contentMatcher.group(1);
+    }
+    for (String item : cell.split("-{10,}")) {
+      List<String> lines = splitHtmlLines(item);
+      if (lines.isEmpty()) {
+        continue;
+      }
+      Map<String, Object> row = new LinkedHashMap<>();
+      row.put("courseName", groupCourseName);
+      row.put("day", day);
+      row.put("serial", serial);
+      row.put("teacher", inferExtensionTeacher(lines, groupCourseName));
+      row.put("classroom", inferClassroomLine(lines, groupCourseName, text(row.get("teacher"))));
+      row.put("debugLines", lines);
+      rows.add(row);
+    }
+    return rows;
+  }
+
+  private String inferExtensionTeacher(List<String> lines, String courseName) {
+    String labeled = extractLabeledLine(lines, "老师", "教师", "授课教师", "任课教师", "任课老师", "上课教师", "主讲教师", "教师姓名");
+    if (!labeled.isBlank()) {
+      return labeled;
+    }
+    return inferTeacherLine(lines, courseName);
+  }
+
+  private String normalizeMatchText(String value) {
+    return text(value)
+        .replace("（", "(")
+        .replace("）", ")")
+        .replaceAll("\\s+", "")
+        .toLowerCase();
+  }
+
   private List<Map<String, Object>> parseTimetableCell(
       String cell,
       String weekNo,
@@ -869,6 +1437,7 @@ public class QzAcademicClient {
           extractLabeledLine(lines, "周次", "节次")
       );
       String weeksRaw = weeksText.replace("(", "").replace(")", "");
+      String sectionText = extractSectionText(weeksText);
       String teacher = firstNonBlank(
           extractFontByTitle(cleanItem, "老师"),
           extractFontByTitle(cleanItem, "教师"),
@@ -892,12 +1461,20 @@ public class QzAcademicClient {
       );
       row.put("courseName", courseName);
       row.put("teacher", teacher);
+      if (teacher.isBlank()) {
+        row.put("teacherMissingReason", "个人课表HTML未返回教师字段");
+        row.put("teacherRootCause", "该课程格子的原始HTML只有课程名/周次/教室，没有 title=老师/教师 或可识别教师行；学长网页解析路线同样拿不到，需要 app.do 的 jsxm 字段或扩展课表接口反查。");
+        row.put("teacherSource", "personal-html-missing");
+      } else {
+        row.put("teacherSource", "personal-html");
+      }
       row.put("weeks_raw", weeksRaw);
       row.put("classroom", classroom);
       row.put("className", fallbackClassName);
       row.put("weekRange", weeksRaw.isBlank() ? weekNo : weeksRaw);
       row.put("day", day);
       row.put("serial", extractSerialFromText(weeksText, serial, false));
+      row.put("sectionText", sectionText);
       row.put("debugLines", lines);
       row.put("debugTitles", extractTitleDebug(cleanItem));
       row.put("debugHtml", preview(cleanItem));
@@ -930,6 +1507,29 @@ public class QzAcademicClient {
       return (lastSection - 1) / 2;
     }
     return fallback;
+  }
+
+  private String extractSectionText(String source) {
+    String text = stripHtml(source);
+    if (text.isBlank()) {
+      return "";
+    }
+    Matcher rangeMatcher = Pattern.compile("(?<!\\d)(\\d{1,2})\\s*[-~－—]\\s*(\\d{1,2})\\s*(?:节|小节)?").matcher(text);
+    String last = "";
+    while (rangeMatcher.find()) {
+      int startSection = parseInt(rangeMatcher.group(1), -1);
+      if (startSection > 0 && looksLikeSectionText(text, startSection, false)) {
+        last = "第" + rangeMatcher.group(1) + "-" + rangeMatcher.group(2) + "节";
+      }
+    }
+    if (!last.isBlank()) {
+      return last;
+    }
+    Matcher singleMatcher = Pattern.compile("(?:第\\s*)?(\\d{1,2})\\s*(?:节|小节)").matcher(text);
+    while (singleMatcher.find()) {
+      last = "第" + singleMatcher.group(1) + "节";
+    }
+    return last;
   }
 
   private boolean looksLikeSectionText(String text, int startSection, boolean allowPureRange) {
@@ -1098,31 +1698,57 @@ public class QzAcademicClient {
 
   private List<Map<String, Object>> parseGradeHtml(String html) {
     List<Map<String, Object>> grades = new ArrayList<>();
-    Matcher tableMatcher = Pattern.compile(
-        "<table[^>]*id\\s*=\\s*['\"]?dataList['\"]?[^>]*>([\\s\\S]*?)</table>",
-        Pattern.CASE_INSENSITIVE
-    ).matcher(html);
-    if (!tableMatcher.find()) {
+    String tableHtml = extractTableById(html, "dataList");
+    if (tableHtml.isBlank()) {
       return grades;
     }
-    Matcher rowMatcher = Pattern.compile("<tr[\\s\\S]*?>([\\s\\S]*?)</tr>", Pattern.CASE_INSENSITIVE).matcher(tableMatcher.group(1));
+    for (String rowHtml : extractRowHtmlList(tableHtml)) {
+      List<String> cells = extractTableCellTexts(rowHtml);
+      if (cells.size() < 3 || looksLikeHeaderRow(cells) || looksLikeEmptyGradeRow(cells)) {
+        continue;
+      }
+      Map<String, Object> grade = mapGradeCells(cells);
+      if (text(grade.get("name")).isBlank()) {
+        continue;
+      }
+      grades.add(grade);
+    }
+    return grades;
+  }
+
+  private List<String> extractRowHtmlList(String tableHtml) {
+    List<String> rows = new ArrayList<>();
+    Matcher rowMatcher = Pattern.compile("<tr\\b[\\s\\S]*?>([\\s\\S]*?)</tr>", Pattern.CASE_INSENSITIVE).matcher(tableHtml);
     while (rowMatcher.find()) {
-      List<String> cells = new ArrayList<>();
-      Matcher cellMatcher = Pattern.compile("<td[\\s\\S]*?>([\\s\\S]*?)</td>", Pattern.CASE_INSENSITIVE).matcher(rowMatcher.group(1));
-      while (cellMatcher.find()) {
-        cells.add(stripHtml(cellMatcher.group(1)));
-      }
-      if (cells.size() < 4) {
-        continue;
-      }
-      String no = cell(cells, 2, cell(cells, 1, ""));
-      String name = cell(cells, 3, cell(cells, 2, ""));
-      if (no.isBlank() && name.isBlank()) {
-        continue;
-      }
-      Map<String, Object> grade = new LinkedHashMap<>();
-      grade.put("no", no);
-      grade.put("name", name);
+      rows.add(rowMatcher.group(1));
+    }
+    return rows;
+  }
+
+  private List<String> extractTableCellTexts(String rowHtml) {
+    List<String> cells = new ArrayList<>();
+    Matcher cellMatcher = Pattern.compile("<(?:td|th)\\b[\\s\\S]*?>([\\s\\S]*?)</(?:td|th)>", Pattern.CASE_INSENSITIVE).matcher(rowHtml);
+    while (cellMatcher.find()) {
+      cells.add(stripHtml(cellMatcher.group(1)));
+    }
+    return cells;
+  }
+
+  private boolean looksLikeHeaderRow(List<String> cells) {
+    String joined = String.join("|", cells);
+    return joined.contains("课程名称") || joined.contains("成绩") && joined.contains("学分");
+  }
+
+  private boolean looksLikeEmptyGradeRow(List<String> cells) {
+    String joined = String.join("", cells);
+    return joined.contains("未查询到") || joined.contains("暂无") || joined.contains("无数据") || joined.isBlank();
+  }
+
+  private Map<String, Object> mapGradeCells(List<String> cells) {
+    Map<String, Object> grade = new LinkedHashMap<>();
+    if (cells.size() >= 11) {
+      grade.put("no", cell(cells, 2, ""));
+      grade.put("name", cell(cells, 3, ""));
       grade.put("grade", cell(cells, 4, ""));
       grade.put("makeup", cell(cells, 5, ""));
       grade.put("rebuild", cell(cells, 6, ""));
@@ -1130,9 +1756,30 @@ public class QzAcademicClient {
       grade.put("credit", cell(cells, 8, ""));
       grade.put("gpa", cell(cells, 9, ""));
       grade.put("minor", cell(cells, 10, ""));
-      grades.add(grade);
+      return grade;
     }
-    return grades;
+    if (cells.size() >= 9) {
+      grade.put("no", cell(cells, 1, ""));
+      grade.put("name", cell(cells, 2, ""));
+      grade.put("grade", cell(cells, 3, ""));
+      grade.put("makeup", cell(cells, 4, ""));
+      grade.put("rebuild", cell(cells, 5, ""));
+      grade.put("type", cell(cells, 6, ""));
+      grade.put("credit", cell(cells, 7, ""));
+      grade.put("gpa", cell(cells, 8, ""));
+      grade.put("minor", cell(cells, 9, ""));
+      return grade;
+    }
+    grade.put("no", cell(cells, 0, ""));
+    grade.put("name", cell(cells, 1, ""));
+    grade.put("grade", cell(cells, 2, ""));
+    grade.put("makeup", "");
+    grade.put("rebuild", "");
+    grade.put("type", "");
+    grade.put("credit", "");
+    grade.put("gpa", "");
+    grade.put("minor", "");
+    return grade;
   }
 
   private String cell(List<String> cells, int index, String fallback) {
@@ -1246,6 +1893,10 @@ public class QzAcademicClient {
 
   private String previewAroundTimetable(String content) {
     String source = content == null ? "" : content;
+    String nonEmpty = previewFirstNonEmptyTimetableCell(source);
+    if (!nonEmpty.isBlank()) {
+      return nonEmpty;
+    }
     String lower = source.toLowerCase();
     int index = lower.indexOf("kbcontent");
     if (index < 0) {
@@ -1259,10 +1910,65 @@ public class QzAcademicClient {
     return preview(source.substring(start, end));
   }
 
+  private String previewAroundElement(String content, String keyword) {
+    String source = content == null ? "" : content;
+    String lower = source.toLowerCase();
+    int index = lower.indexOf(keyword.toLowerCase());
+    if (index < 0) {
+      return preview(source);
+    }
+    int start = Math.max(0, index - 180);
+    int end = Math.min(source.length(), index + 900);
+    return preview(source.substring(start, end));
+  }
+
+  private Map<String, Object> gradeTableDebug(String html) {
+    Map<String, Object> debug = new LinkedHashMap<>();
+    String table = extractTableById(html, "dataList");
+    debug.put("hasTable", !table.isBlank());
+    if (table.isBlank()) {
+      return debug;
+    }
+    List<String> rows = extractRowHtmlList(table);
+    debug.put("rowCount", rows.size());
+    for (String row : rows) {
+      List<String> cells = extractTableCellTexts(row);
+      if (cells.isEmpty()) {
+        continue;
+      }
+      debug.put("firstCellCount", cells.size());
+      debug.put("firstCells", cells.subList(0, Math.min(cells.size(), 12)));
+      debug.put("firstRowHtml", preview(row));
+      break;
+    }
+    return debug;
+  }
+
+  private String previewFirstNonEmptyTimetableCell(String html) {
+    Matcher matcher = divClassMatcher(html, "kbcontent1");
+    while (matcher.find()) {
+      String content = matcher.group(1);
+      String text = stripHtml(content);
+      if (!text.isBlank()) {
+        return preview(content);
+      }
+    }
+    matcher = divClassMatcher(html, "kbcontent");
+    while (matcher.find()) {
+      String content = matcher.group(1);
+      String text = stripHtml(content);
+      if (!text.isBlank()) {
+        return preview(content);
+      }
+    }
+    return "";
+  }
+
   private String timetableAttemptSummary(String params, String html, int parsedRows) {
     String source = html == null ? "" : html;
     String lower = source.toLowerCase();
     int kbcontentCount = countMatches(lower, "kbcontent");
+    String firstNonEmpty = stripHtml(previewFirstNonEmptyTimetableCell(source));
     return params
         + " status="
         + (isLoginOrGatewayPage(source, 200) ? "login/gateway" : "html")
@@ -1271,7 +1977,8 @@ public class QzAcademicClient {
         + ", kbcontent="
         + kbcontentCount
         + ", parsed="
-        + parsedRows;
+        + parsedRows
+        + (firstNonEmpty.isBlank() ? "" : ", firstNonEmpty=" + firstNonEmpty.substring(0, Math.min(firstNonEmpty.length(), 60)));
   }
 
   private int countMatches(String source, String keyword) {
@@ -1285,6 +1992,41 @@ public class QzAcademicClient {
       index += keyword.length();
     }
     return count;
+  }
+
+  private int countClassMatches(String html, String className) {
+    int count = 0;
+    Matcher matcher = divClassMatcher(html, className);
+    while (matcher.find()) {
+      count += 1;
+    }
+    return count;
+  }
+
+  private int nonEmptyClassContentCount(String html, String className) {
+    int count = 0;
+    Matcher matcher = divClassMatcher(html, className);
+    while (matcher.find()) {
+      if (!stripHtml(matcher.group(1)).isBlank()) {
+        count += 1;
+      }
+    }
+    return count;
+  }
+
+  private List<String> sampleClassContents(String html, String className, int limit) {
+    List<String> samples = new ArrayList<>();
+    Matcher matcher = divClassMatcher(html, className);
+    while (matcher.find() && samples.size() < limit) {
+      String content = matcher.group(1);
+      if (!stripHtml(content).isBlank()) {
+        samples.add(preview(content));
+      }
+    }
+    if (!samples.isEmpty() || !"kbcontent1".equals(className)) {
+      return samples;
+    }
+    return sampleClassContents(html, "kbcontent", limit);
   }
 
   private List<Map<String, Object>> extractRows(Object raw) {
@@ -1304,6 +2046,72 @@ public class QzAcademicClient {
       }
     }
     return Collections.emptyList();
+  }
+
+  private Map<String, Object> normalizeStudentProfile(Object raw) {
+    Map<String, Object> profile = new LinkedHashMap<>();
+    if (raw instanceof Map) {
+      Map<String, Object> map = castMap((Map<?, ?>) raw);
+      Object data = map.get("data");
+      if (data instanceof Map) {
+        profile.putAll(castMap((Map<?, ?>) data));
+      } else {
+        profile.putAll(map);
+      }
+    } else {
+      List<Map<String, Object>> rows = extractRows(raw);
+      if (!rows.isEmpty()) {
+        profile.putAll(rows.get(0));
+      }
+    }
+    if (profile.isEmpty()) {
+      throw new IllegalArgumentException("教务 getUserInfo 没有返回可识别的学生基础信息");
+    }
+    return profile;
+  }
+
+  private Map<String, Object> parseStudentProfileHtml(String html) {
+    List<String> cells = new ArrayList<>();
+    Matcher matcher = Pattern.compile("<t[dh]\\b[\\s\\S]*?>([\\s\\S]*?)</t[dh]>", Pattern.CASE_INSENSITIVE).matcher(html);
+    while (matcher.find()) {
+      String value = stripHtml(matcher.group(1)).replace("：", "").replace(":", "").trim();
+      if (!value.isBlank()) {
+        cells.add(value);
+      }
+    }
+
+    Map<String, Object> profile = new LinkedHashMap<>();
+    for (int index = 0; index + 1 < cells.size(); index += 1) {
+      String mappedKey = profileKey(cells.get(index));
+      if (mappedKey.isBlank()) {
+        continue;
+      }
+      String value = cells.get(index + 1);
+      if (!value.isBlank() && !profile.containsKey(mappedKey)) {
+        profile.put(mappedKey, value);
+      }
+    }
+    return profile;
+  }
+
+  private String profileKey(String label) {
+    String normalized = label.replaceAll("\\s+", "");
+    if (containsAny(normalized, "姓名")) {
+      return "xm";
+    }
+    if (containsAny(normalized, "学号")) {
+      return "xh";
+    }
+    if (containsAny(normalized, "院系", "学院", "所在院")) {
+      return "xymc";
+    }
+    if (containsAny(normalized, "专业")) {
+      return "zymc";
+    }
+    if (containsAny(normalized, "行政班", "班级")) {
+      return "bjmc";
+    }
+    return "";
   }
 
   private List<Map<String, Object>> normalizeCourses(Map<String, Object> raw, String weekNo, String fallbackClassName) {
@@ -1370,6 +2178,9 @@ public class QzAcademicClient {
   private Map<String, Object> normalizeCourse(Map<String, Object> raw, String weekNo, String fallbackClassName) {
     Map<String, Object> row = new LinkedHashMap<>();
     String teacherName = firstText(raw, "teacher", "jsxm", "jsmc", "skjs", "rkjs", "teacherName", "教师");
+    String teacherMissingReason = firstText(raw, "teacherMissingReason");
+    String teacherRootCause = firstText(raw, "teacherRootCause");
+    String teacherSource = firstText(raw, "teacherSource");
     row.put("departmentName", firstText(raw, "kkxymc", "jsxymc", "jsszdw", "departmentName", "教师所在院系"));
     row.put("plannedTeacherName", teacherName);
     row.put("actualTeacherName", teacherName);
@@ -1383,7 +2194,11 @@ public class QzAcademicClient {
     row.put("locationText", firstText(raw, "jxdd", "jsmc", "cdmc", "教室", "上课地点"));
     row.put("day", raw.get("day"));
     row.put("serial", raw.get("serial"));
+    row.put("sectionText", firstText(raw, "sectionText", "节次"));
     row.put("teacherName", firstText(raw, "teacher", "jsxm", "jsmc", "skjs", "rkjs", "teacherName", "教师"));
+    row.put("teacherMissingReason", teacherName.isBlank() ? teacherMissingReason : "");
+    row.put("teacherRootCause", teacherName.isBlank() ? teacherRootCause : "");
+    row.put("teacherSource", teacherSource.isBlank() && !teacherName.isBlank() ? "primary-timetable" : teacherSource);
     row.put("classroom", firstText(raw, "classroom", "jxdd", "jsmc", "cdmc", "教室", "上课地点"));
     row.put("weeksRaw", weekRange.isBlank() ? weekNo : weekRange);
     row.put("raw", raw);
@@ -1412,8 +2227,15 @@ public class QzAcademicClient {
   }
 
   private HttpHeaders formHeaders(String cookie) {
+    return formHeaders(cookie, webBaseUrl);
+  }
+
+  private HttpHeaders formHeaders(String cookie, String referer) {
     HttpHeaders headers = defaultHeaders();
     headers.set("Content-Type", "application/x-www-form-urlencoded");
+    if (referer != null && !referer.isBlank()) {
+      headers.set("Referer", referer);
+    }
     if (cookie != null && !cookie.isBlank()) {
       headers.set("Cookie", cookie);
     }

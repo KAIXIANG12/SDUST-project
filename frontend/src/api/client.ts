@@ -1,6 +1,9 @@
 import { APP_CONFIG } from "../config";
 import type {
   ApiEnvelope,
+  AcademicDebugRequest,
+  AcademicDebugResponse,
+  AcademicTimetableRequest,
   AcademicLoginRequest,
   AcademicLoginResponse,
   AcademicCalendar,
@@ -25,6 +28,9 @@ import type {
   SyncPersonalTimetableRequest,
   SyncPersonalTimetableResponse,
   WeeklyFeedback,
+  WeeklyFeedbackAnalytics,
+  WeeklyFeedbackSummary,
+  WeeklyTaskItem,
   WeeklyTask,
   WeeklyTaskCompliance
 } from "./types";
@@ -91,6 +97,18 @@ export const apiClient = {
   getUsers() {
     return request<CurrentUser[]>("/users");
   },
+  updateUserAuthorization(id: number, payload: Record<string, unknown>) {
+    return request<CurrentUser>(`/users/${id}/authorization`, {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    });
+  },
+  importUsers(payload: { rows: Record<string, unknown>[] }) {
+    return request<ImportTeachingTasksResponse>("/users/import", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  },
   getMasterData(resource: MasterResource) {
     return request<MasterRecord[]>(`/master-data/${resource}`);
   },
@@ -105,6 +123,20 @@ export const apiClient = {
   },
   getWeeklyTaskCompliance() {
     return request<WeeklyTaskCompliance[]>("/schedules/weekly-task-compliance");
+  },
+  getWeeklyTaskItems() {
+    return request<WeeklyTaskItem[]>("/schedules/weekly-task-items");
+  },
+  getWeeklyFeedbackAnalytics() {
+    return request<WeeklyFeedbackAnalytics>("/analytics/weekly-feedback");
+  },
+  getWeeklyFeedbackSummaries() {
+    return request<WeeklyFeedbackSummary[]>("/analytics/weekly-feedback/summaries");
+  },
+  generateWeeklyFeedbackAiSummaries() {
+    return request<WeeklyFeedbackSummary[]>("/analytics/weekly-feedback/ai-summaries", {
+      method: "POST"
+    });
   },
   importTeachingTasks(payload: ImportTeachingTasksRequest) {
     return request<ImportTeachingTasksResponse>("/schedules/teaching-tasks/import", {
@@ -124,6 +156,18 @@ export const apiClient = {
   },
   queryGrades(payload: GradeQueryRequest) {
     return request<GradeQueryResponse>("/academic/grades/query", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  },
+  queryAcademicTimetable(payload: AcademicTimetableRequest) {
+    return request<MyTimetableResponse>("/academic/timetable/query", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  },
+  diagnoseAcademic(payload: AcademicDebugRequest) {
+    return request<AcademicDebugResponse>("/academic/debug/probe", {
       method: "POST",
       body: JSON.stringify(payload)
     });
@@ -178,6 +222,17 @@ export const apiClient = {
     return request<RealtimeFeedback>("/feedbacks/realtime", {
       method: "POST",
       body: JSON.stringify(payload)
+    });
+  },
+  updateRealtimeFeedback(id: number, payload: Record<string, unknown>) {
+    return request<RealtimeFeedback>(`/feedbacks/realtime/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    });
+  },
+  deleteRealtimeFeedback(id: number) {
+    return request<{ id: number; deleted: boolean }>(`/feedbacks/realtime/${id}`, {
+      method: "DELETE"
     });
   }
 };

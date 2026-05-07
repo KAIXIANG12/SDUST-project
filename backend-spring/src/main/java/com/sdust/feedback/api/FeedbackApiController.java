@@ -3,14 +3,17 @@ package com.sdust.feedback.api;
 import com.sdust.feedback.common.ApiResponse;
 import com.sdust.feedback.security.PasswordService;
 import com.sdust.feedback.security.TokenService;
+import com.sdust.feedback.service.AiAnalysisService;
 import com.sdust.feedback.service.FeedbackDatabaseService;
 import com.sdust.feedback.service.QzAcademicClient;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PatchMapping;
@@ -26,17 +29,20 @@ import org.springframework.web.bind.annotation.RestController;
 public class FeedbackApiController {
   private final FeedbackDatabaseService databaseService;
   private final QzAcademicClient academicClient;
+  private final AiAnalysisService aiAnalysisService;
   private final PasswordService passwordService;
   private final TokenService tokenService;
 
   public FeedbackApiController(
       FeedbackDatabaseService databaseService,
       QzAcademicClient academicClient,
+      AiAnalysisService aiAnalysisService,
       PasswordService passwordService,
       TokenService tokenService
   ) {
     this.databaseService = databaseService;
     this.academicClient = academicClient;
+    this.aiAnalysisService = aiAnalysisService;
     this.passwordService = passwordService;
     this.tokenService = tokenService;
   }
@@ -75,6 +81,9 @@ public class FeedbackApiController {
     if (user == null) {
       return badRequest("用户不存在");
     }
+    if (!"ACTIVE".equals(text(user.get("status")))) {
+      return forbidden("账号已被禁用，请联系管理员");
+    }
 
     if (!passwordService.verify(password, text(user.get("passwordHash")))) {
       return badRequest("密码错误");
@@ -103,7 +112,15 @@ public class FeedbackApiController {
       body.putIfAbsent("termCode", calendar.get("termCode"));
       body.putIfAbsent("weekNo", calendar.get("currentWeek"));
       QzAcademicClient.AcademicSessionResult academicSession = academicClient.loginWebSession(body);
+      body.put("academicSessionId", academicSession.getAcademicSessionId());
+      body.put("profileFastOnly", true);
+      body.put("enrichTeachers", "false");
       Map<String, Object> user = databaseService.ensureAcademicStudentUser(account);
+      if (!"ACTIVE".equals(text(user.get("status")))) {
+        return forbidden("账号已被禁用，请联系管理员");
+      }
+      Map<String, Object> profileSync = tryBindAcademicProfile(body, account, user);
+      user = castUser(profileSync.remove("user"), user);
       Map<String, Object> safeUser = safeUser(user);
       Map<String, Object> data = new HashMap<>();
       data.put("token", tokenService.createToken(
@@ -117,23 +134,22 @@ public class FeedbackApiController {
       data.put("termStart", calendar.get("termStart"));
       data.put("dateRow", calendar.get("dateRow"));
       data.put("academicSessionId", academicSession.getAcademicSessionId());
+      data.put("profileSync", profileSync);
       data.put("source", "academic");
-      try {
-        QzAcademicClient.SyncResult timetable = academicClient.readPersonalTimetableFromSession(body, academicSession.getAcademicSessionId());
-        data.put("termCode", timetable.getTermCode());
-        data.put("weekNo", timetable.getWeekNo());
-        data.put("rawCount", timetable.getRawCount());
-        data.put("timetable", timetable.getRows());
-      } catch (IllegalArgumentException warning) {
-        data.put("rawCount", 0);
-        data.put("timetable", java.util.Collections.emptyList());
-        data.put("warning", warning.getMessage());
-      }
+      data.put("rawCount", 0);
+      data.put("timetable", java.util.Collections.emptyList());
       return ResponseEntity.ok(ApiResponse.ok(data));
     } catch (IllegalArgumentException error) {
       if (error.getMessage() != null && error.getMessage().startsWith("教务登录成功")) {
         Map<String, Object> calendar = databaseService.currentAcademicCalendar();
+        body.put("profileFastOnly", true);
+        body.put("enrichTeachers", "false");
         Map<String, Object> user = databaseService.ensureAcademicStudentUser(account);
+        if (!"ACTIVE".equals(text(user.get("status")))) {
+          return forbidden("账号已被禁用，请联系管理员");
+        }
+        Map<String, Object> profileSync = tryBindAcademicProfile(body, account, user);
+        user = castUser(profileSync.remove("user"), user);
         Map<String, Object> data = new HashMap<>();
         data.put("token", tokenService.createToken(
             number(user.get("id")),
@@ -141,6 +157,7 @@ public class FeedbackApiController {
             text(user.get("role"))
         ));
         data.put("user", safeUser(user));
+        data.put("profileSync", profileSync);
         data.put("termCode", calendar.get("termCode"));
         data.put("weekNo", calendar.get("currentWeek"));
         data.put("termStart", calendar.get("termStart"));
@@ -219,6 +236,41 @@ public class FeedbackApiController {
     return ResponseEntity.ok(ApiResponse.ok(databaseService.users(user)));
   }
 
+  @PatchMapping("/users/{id}/authorization")
+  public ResponseEntity<ApiResponse<?>> updateUserAuthorization(
+      @PathVariable Long id,
+      @RequestHeader(value = "Authorization", required = false) String authorization,
+      @RequestBody Map<String, Object> body
+  ) {
+    Map<String, Object> user = authenticatedUser(authorization);
+    if (user == null) {
+      return unauthorized();
+    }
+    if (!isAdmin(user)) {
+      return forbidden("只有管理员可以维护用户角色");
+    }
+    try {
+      return ResponseEntity.ok(ApiResponse.ok(databaseService.updateUserAuthorization(id, body, user)));
+    } catch (IllegalArgumentException error) {
+      return badRequest(error.getMessage());
+    }
+  }
+
+  @PostMapping("/users/import")
+  public ResponseEntity<ApiResponse<?>> importUsers(
+      @RequestHeader(value = "Authorization", required = false) String authorization,
+      @RequestBody Map<String, Object> body
+  ) {
+    Map<String, Object> user = authenticatedUser(authorization);
+    if (user == null) {
+      return unauthorized();
+    }
+    if (!isAdmin(user)) {
+      return forbidden("只有管理员可以导入用户");
+    }
+    return ResponseEntity.ok(ApiResponse.ok(databaseService.importUsers(body, user)));
+  }
+
   @GetMapping("/master-data")
   public ApiResponse<?> supportedMasterData() {
     return ApiResponse.ok(databaseService.supportedResources());
@@ -274,6 +326,17 @@ public class FeedbackApiController {
     return ResponseEntity.ok(ApiResponse.ok(databaseService.weeklyTaskCompliance(user)));
   }
 
+  @GetMapping("/schedules/weekly-task-items")
+  public ResponseEntity<ApiResponse<?>> weeklyTaskItems(
+      @RequestHeader(value = "Authorization", required = false) String authorization
+  ) {
+    Map<String, Object> user = authenticatedUser(authorization);
+    if (user == null) {
+      return unauthorized();
+    }
+    return ResponseEntity.ok(ApiResponse.ok(databaseService.weeklyTaskCourseItems(user)));
+  }
+
   @PostMapping("/schedules/weekly-tasks/generate")
   public ApiResponse<?> generateWeeklyTasks(@RequestBody Map<String, Object> body) {
     return ApiResponse.ok(databaseService.generateWeeklyTasks(body));
@@ -322,6 +385,81 @@ public class FeedbackApiController {
       return badRequest(error.getMessage());
     } catch (Exception error) {
       return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(ApiResponse.fail("成绩查询失败：" + error.getMessage()));
+    }
+  }
+
+  @PostMapping("/academic/timetable/query")
+  public ResponseEntity<ApiResponse<?>> queryAcademicTimetable(
+      @RequestHeader(value = "Authorization", required = false) String authorization,
+      @RequestBody Map<String, Object> body
+  ) {
+    Map<String, Object> user = authenticatedUser(authorization);
+    if (user == null) {
+      return unauthorized();
+    }
+    String currentAccount = text(user.get("username"));
+    String academicSessionId = text(body.get("academicSessionId"));
+    if (academicSessionId.isBlank()) {
+      return badRequest("缺少教务会话，请先学校账号登录");
+    }
+    if (!academicClient.isAcademicSessionOwner(academicSessionId, currentAccount)) {
+      return forbidden("教务登录会话不属于当前账号，请重新使用学校账号登录");
+    }
+    Map<String, Object> calendar = databaseService.currentAcademicCalendar();
+    body.put("account", currentAccount);
+    body.putIfAbsent("termCode", calendar.get("termCode"));
+    body.putIfAbsent("weekNo", calendar.get("currentWeek"));
+    body.putIfAbsent("enrichTeachers", "false");
+    try {
+      QzAcademicClient.SyncResult timetable = academicClient.readPersonalTimetableFromSession(body, academicSessionId);
+      Map<String, Object> data = new HashMap<>();
+      data.put("termCode", timetable.getTermCode());
+      data.put("weekNo", timetable.getWeekNo());
+      data.put("termStart", calendar.get("termStart"));
+      data.put("today", calendar.get("today"));
+      data.put("dateRow", calendar.get("dateRow"));
+      data.put("rawCount", timetable.getRawCount());
+      data.put("academicSessionId", academicSessionId);
+      data.put("source", "academic");
+      List<Map<String, Object>> rows = databaseService.enrichTimetableTeachers(
+          user,
+          timetable.getRows(),
+          number(timetable.getWeekNo()).intValue()
+      );
+      data.put("timetable", rows);
+      data.put("info", rows);
+      return ResponseEntity.ok(ApiResponse.ok(data));
+    } catch (IllegalArgumentException error) {
+      return badRequest(error.getMessage());
+    } catch (Exception error) {
+      return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(ApiResponse.fail("教务课表查询失败：" + error.getMessage()));
+    }
+  }
+
+  @PostMapping("/academic/debug/probe")
+  public ResponseEntity<ApiResponse<?>> academicDebugProbe(
+      @RequestHeader(value = "Authorization", required = false) String authorization,
+      @RequestBody Map<String, Object> body
+  ) {
+    Map<String, Object> user = authenticatedUser(authorization);
+    if (user == null) {
+      return unauthorized();
+    }
+    String currentAccount = text(user.get("username"));
+    String academicSessionId = text(body.get("academicSessionId"));
+    if (academicSessionId.isBlank()) {
+      return badRequest("缺少教务会话，请先学校账号登录");
+    }
+    if (!academicClient.isAcademicSessionOwner(academicSessionId, currentAccount)) {
+      return forbidden("教务登录会话不属于当前账号，请重新使用学校账号登录");
+    }
+    body.put("account", currentAccount);
+    try {
+      return ResponseEntity.ok(ApiResponse.ok(academicClient.diagnoseAcademicSession(body)));
+    } catch (IllegalArgumentException error) {
+      return badRequest(error.getMessage());
+    } catch (Exception error) {
+      return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(ApiResponse.fail("教务诊断失败：" + error.getMessage()));
     }
   }
 
@@ -379,6 +517,9 @@ public class FeedbackApiController {
       return unauthorized();
     }
     body.put("studentId", user.get("id"));
+    if (!databaseService.canSubmitWeeklyFeedbackForCourse(body, user)) {
+      return forbidden("只能提交自己当前周课表中存在的课程反馈");
+    }
     return ResponseEntity.ok(ApiResponse.ok(databaseService.createWeeklyFeedback(body)));
   }
 
@@ -403,8 +544,41 @@ public class FeedbackApiController {
       return unauthorized();
     }
     body.put("studentId", user.get("id"));
-    body.put("departmentId", user.get("departmentId"));
+    body.put("departmentId", databaseService.resolveUserDepartmentId(user));
     return ResponseEntity.ok(ApiResponse.ok(databaseService.createRealtimeFeedback(body)));
+  }
+
+  @PatchMapping("/feedbacks/realtime/{id}")
+  public ResponseEntity<ApiResponse<?>> updateRealtimeFeedback(
+      @PathVariable Long id,
+      @RequestHeader(value = "Authorization", required = false) String authorization,
+      @RequestBody Map<String, Object> body
+  ) {
+    Map<String, Object> user = authenticatedUser(authorization);
+    if (user == null) {
+      return unauthorized();
+    }
+    try {
+      return ResponseEntity.ok(ApiResponse.ok(databaseService.updateRealtimeFeedback(id, body, user)));
+    } catch (IllegalArgumentException error) {
+      return forbidden(error.getMessage());
+    }
+  }
+
+  @DeleteMapping("/feedbacks/realtime/{id}")
+  public ResponseEntity<ApiResponse<?>> deleteRealtimeFeedback(
+      @PathVariable Long id,
+      @RequestHeader(value = "Authorization", required = false) String authorization
+  ) {
+    Map<String, Object> user = authenticatedUser(authorization);
+    if (user == null) {
+      return unauthorized();
+    }
+    try {
+      return ResponseEntity.ok(ApiResponse.ok(databaseService.deleteRealtimeFeedback(id, user)));
+    } catch (IllegalArgumentException error) {
+      return forbidden(error.getMessage());
+    }
   }
 
   @PostMapping("/feedbacks/reply")
@@ -473,6 +647,55 @@ public class FeedbackApiController {
     return ResponseEntity.ok(ApiResponse.ok(databaseService.flags(user)));
   }
 
+  @GetMapping("/analytics/weekly-feedback")
+  public ResponseEntity<ApiResponse<?>> weeklyFeedbackAnalytics(
+      @RequestHeader(value = "Authorization", required = false) String authorization
+  ) {
+    Map<String, Object> user = authenticatedUser(authorization);
+    if (user == null) {
+      return unauthorized();
+    }
+    if (!isAdmin(user)) {
+      return forbidden("只有管理员可以查看聚合统计");
+    }
+    return ResponseEntity.ok(ApiResponse.ok(databaseService.weeklyFeedbackAnalytics(user)));
+  }
+
+  @GetMapping("/analytics/weekly-feedback/summaries")
+  public ResponseEntity<ApiResponse<?>> weeklyFeedbackSummaries(
+      @RequestHeader(value = "Authorization", required = false) String authorization
+  ) {
+    Map<String, Object> user = authenticatedUser(authorization);
+    if (user == null) {
+      return unauthorized();
+    }
+    if (!isAdmin(user)) {
+      return forbidden("只有管理员可以查看反馈总评");
+    }
+    return ResponseEntity.ok(ApiResponse.ok(databaseService.weeklyFeedbackSummaries(user)));
+  }
+
+  @PostMapping("/analytics/weekly-feedback/ai-summaries")
+  public ResponseEntity<ApiResponse<?>> weeklyFeedbackAiSummaries(
+      @RequestHeader(value = "Authorization", required = false) String authorization
+  ) {
+    Map<String, Object> user = authenticatedUser(authorization);
+    if (user == null) {
+      return unauthorized();
+    }
+    if (!isAdmin(user)) {
+      return forbidden("只有管理员可以生成 AI 总评");
+    }
+    try {
+      List<Map<String, Object>> summaries = databaseService.weeklyFeedbackSummaries(user);
+      return ResponseEntity.ok(ApiResponse.ok(aiAnalysisService.enhanceWeeklySummaries(summaries)));
+    } catch (IllegalArgumentException error) {
+      return badRequest(error.getMessage());
+    } catch (Exception error) {
+      return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(ApiResponse.fail("AI 总评生成失败：" + error.getMessage()));
+    }
+  }
+
   private ResponseEntity<ApiResponse<?>> badRequest(String message) {
     return ResponseEntity.badRequest().body(ApiResponse.fail(message));
   }
@@ -497,6 +720,82 @@ public class FeedbackApiController {
     Map<String, Object> safe = new HashMap<>(user);
     safe.remove("passwordHash");
     return safe;
+  }
+
+  private Map<String, Object> tryBindAcademicProfile(Map<String, Object> body, String account, Map<String, Object> currentUser) {
+    Map<String, Object> result = new HashMap<>();
+    result.put("bound", false);
+    result.put("user", currentUser);
+    String webWarning = "";
+    try {
+      String academicSessionId = text(body.get("academicSessionId"));
+      Map<String, Object> profile;
+      if (!academicSessionId.isBlank()) {
+        result.put("source", "HTML grxx/xsxx");
+        profile = academicClient.readStudentProfileFromWebSession(academicSessionId);
+      } else {
+        result.put("source", "app.do getUserInfo");
+        profile = academicClient.readStudentProfileFromAppApi(body);
+      }
+      Map<String, Object> user = databaseService.bindAcademicStudentProfile(account, profile);
+      result.put("user", user);
+      String realName = firstText(profile, "xm", "xsmc", "name", "realName", "studentName", "姓名");
+      String departmentName = firstText(profile, "xy", "xymc", "xyxm", "academy", "academyName", "departmentName", "院系", "学院");
+      String majorName = firstText(profile, "zy", "zymc", "major", "majorName", "专业");
+      String className = firstText(profile, "bj", "bjmc", "xzb", "className", "行政班", "班级");
+      boolean recognized = !realName.isBlank() || !departmentName.isBlank() || !majorName.isBlank() || !className.isBlank();
+      result.put("bound", recognized);
+      result.put("realName", realName);
+      result.put("departmentName", departmentName);
+      result.put("majorName", majorName);
+      result.put("className", className);
+      if (!recognized) {
+        result.put("warning", "教务 getUserInfo 返回了数据，但没有发现姓名、学院、专业或班级字段");
+      }
+    } catch (Exception error) {
+      webWarning = error.getMessage();
+      if (Boolean.TRUE.equals(body.get("profileFastOnly"))) {
+        result.put("warning", "HTML 个人信息页失败：" + webWarning);
+        return result;
+      }
+      try {
+        result.put("source", "app.do getUserInfo");
+        Map<String, Object> profile = academicClient.readStudentProfileFromAppApi(body);
+        Map<String, Object> user = databaseService.bindAcademicStudentProfile(account, profile);
+        result.put("user", user);
+        String realName = firstText(profile, "xm", "xsmc", "name", "realName", "studentName", "姓名");
+        String departmentName = firstText(profile, "xy", "xymc", "xyxm", "academy", "academyName", "departmentName", "院系", "学院");
+        String majorName = firstText(profile, "zy", "zymc", "major", "majorName", "专业");
+        String className = firstText(profile, "bj", "bjmc", "xzb", "className", "行政班", "班级");
+        boolean recognized = !realName.isBlank() || !departmentName.isBlank() || !majorName.isBlank() || !className.isBlank();
+        result.put("bound", recognized);
+        result.put("realName", realName);
+        result.put("departmentName", departmentName);
+        result.put("majorName", majorName);
+        result.put("className", className);
+        if (!recognized) {
+          result.put("warning", "HTML 个人信息页失败：" + webWarning + "；app.do getUserInfo 返回了数据，但没有发现姓名、学院、专业或班级字段");
+        }
+      } catch (Exception appError) {
+        result.put("warning", "HTML 个人信息页失败：" + webWarning + "；app.do getUserInfo 失败：" + appError.getMessage());
+      }
+    }
+    return result;
+  }
+
+  @SuppressWarnings("unchecked")
+  private Map<String, Object> castUser(Object value, Map<String, Object> fallback) {
+    return value instanceof Map ? (Map<String, Object>) value : fallback;
+  }
+
+  private String firstText(Map<String, Object> row, String... keys) {
+    for (String key : keys) {
+      String value = text(row.get(key));
+      if (!value.isBlank()) {
+        return value;
+      }
+    }
+    return "";
   }
 
   private String text(Object value) {

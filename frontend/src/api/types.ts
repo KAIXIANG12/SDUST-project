@@ -80,6 +80,13 @@ export type AcademicLoginResponse = LoginResponse & {
   timetable: PersonalTimetableItem[];
 };
 
+export type AcademicTimetableRequest = {
+  academicSessionId: string;
+  termCode?: string;
+  weekNo?: number | string;
+  enrichTeachers?: boolean | string;
+};
+
 export type MyTimetableResponse = {
   termCode: string;
   termStart: string;
@@ -120,6 +127,15 @@ export type GradeQueryResponse = {
   weightedGpa: number;
   grades: GradeRecord[];
 };
+
+export type AcademicDebugRequest = {
+  academicSessionId: string;
+  password?: string;
+  termCode?: string;
+  weekNo?: string | number;
+};
+
+export type AcademicDebugResponse = Record<string, unknown>;
 
 export type HealthStatus = {
   status: string;
@@ -169,7 +185,57 @@ export type WeeklyTaskCompliance = {
   submittedAt?: string | null;
   complianceStatus: "OVERDUE_MISSING" | "PENDING" | "LATE_SUBMITTED" | "SUBMITTED" | string;
   feedbackWordCount?: number | null;
+  totalCourseCount?: number;
+  submittedCourseCount?: number;
+  missingCourseCount?: number;
+  lowQualityCount?: number;
   qualityRemark?: string;
+};
+
+export type WeeklyTaskItem = Record<string, unknown> & {
+  taskId: number;
+  weekNo: number;
+  className: string;
+  courseId: number;
+  courseName: string;
+  teacherId?: number | null;
+  teacherName?: string;
+  plannedTeacherName?: string;
+  actualTeacherName?: string;
+  teacherDepartmentName?: string;
+  weekRange?: string;
+  guidanceMode?: string;
+  classroom?: string;
+  feedbackId?: number | null;
+  itemStatus: string;
+  qualityStatus: string;
+  qualityRemark?: string;
+  feedbackWordCount?: number;
+};
+
+export type WeeklyFeedbackAnalytics = {
+  byClass: Array<Record<string, unknown>>;
+  byCourse: Array<Record<string, unknown>>;
+  byTeacher: Array<Record<string, unknown>>;
+};
+
+export type WeeklyFeedbackSummary = Record<string, unknown> & {
+  teacherName: string;
+  courseName: string;
+  classes: string;
+  feedbackCount: number;
+  sensitiveFlagCount: number;
+  riskLevel: "HIGH" | "MEDIUM" | "LOW" | string;
+  positiveSummary: string;
+  issueSummary: string;
+  hardwareSummary: string;
+  modelSummary: string;
+  aiSummary?: string;
+  aiRiskLevel?: "HIGH" | "MEDIUM" | "LOW" | string;
+  aiSensitivePoints?: string[];
+  aiSuggestions?: string[];
+  aiProvider?: string;
+  aiError?: string;
 };
 
 export type WeeklyFeedback = Record<string, unknown> & {
@@ -185,6 +251,8 @@ export type WeeklyFeedback = Record<string, unknown> & {
   assignmentAssessment?: string;
   guidanceMode?: string;
   learningOutcome?: string;
+  contentArrangementEval?: string;
+  coTeacherEvaluation?: string;
   issueSuggestion?: string;
   hardwareIssue?: string;
   remark?: string;

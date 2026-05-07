@@ -3,6 +3,8 @@ package com.sdust.feedback.service;
 import java.sql.PreparedStatement;
 import java.sql.Statement;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -26,6 +28,10 @@ public class FeedbackDatabaseService {
   private final String fallbackCurrentTerm;
   private final LocalDate fallbackTermStart;
   private final Map<String, ResourceConfig> resources;
+  private static final String ROLE_PRIORITY_SQL =
+      "CASE r.role_key WHEN 'SUPER_ADMIN' THEN 4 WHEN 'DEPARTMENT_ADMIN' THEN 3 WHEN 'CLASS_REPRESENTATIVE' THEN 2 WHEN 'STUDENT' THEN 1 ELSE 0 END";
+  private static final String ROLE_PRIORITY_SQL_R2 =
+      "CASE r2.role_key WHEN 'SUPER_ADMIN' THEN 4 WHEN 'DEPARTMENT_ADMIN' THEN 3 WHEN 'CLASS_REPRESENTATIVE' THEN 2 WHEN 'STUDENT' THEN 1 ELSE 0 END";
 
   public FeedbackDatabaseService(
       JdbcTemplate db,
@@ -153,6 +159,36 @@ public class FeedbackDatabaseService {
     return result;
   }
 
+  public List<Map<String, Object>> enrichTimetableTeachers(Map<String, Object> user, List<Map<String, Object>> rows, Integer weekNo) {
+    Long classGroupId = classGroupId(user);
+    if (classGroupId == null || classGroupId <= 0 || rows == null || rows.isEmpty()) {
+      return rows == null ? Collections.emptyList() : rows;
+    }
+    List<Map<String, Object>> enriched = new ArrayList<>();
+    for (Map<String, Object> row : rows) {
+      Map<String, Object> item = new LinkedHashMap<>(row);
+      String existingTeacher = firstText(item, "teacherName", "teacher", "actualTeacherName", "plannedTeacherName");
+      if (existingTeacher.isBlank()) {
+        Map<String, Object> matched = matchTeachingTask(classGroupId, item, weekNo);
+        String matchedTeacher = firstText(matched, "teacherName", "actualTeacherName", "plannedTeacherName");
+        if (!matchedTeacher.isBlank()) {
+          item.put("teacherName", matchedTeacher);
+          item.put("teacher", matchedTeacher);
+          item.put("plannedTeacherName", firstText(matched, "plannedTeacherName", "teacherName"));
+          item.put("actualTeacherName", firstText(matched, "actualTeacherName", "teacherName"));
+          item.put("teacherSource", "local-teaching-task");
+          item.put("teacherMissingReason", "");
+          item.put("teacherRootCause", "");
+        }
+        if (asString(item.get("className")).isBlank()) {
+          item.put("className", classNameById(classGroupId));
+        }
+      }
+      enriched.add(item);
+    }
+    return enriched;
+  }
+
   public Map<String, Object> findUserByUsername(String username) {
     List<Map<String, Object>> rows = db.queryForList(
         "SELECT u.id, u.username, u.password_hash AS passwordHash, u.real_name AS realName, " +
@@ -162,7 +198,8 @@ public class FeedbackDatabaseService {
             "LEFT JOIN department d ON d.id = u.department_id " +
             "LEFT JOIN user_role ur ON ur.user_id = u.id " +
             "LEFT JOIN role r ON r.id = ur.role_id " +
-            "WHERE u.username = ? LIMIT 1",
+            "WHERE u.username = ? " +
+            "ORDER BY " + ROLE_PRIORITY_SQL + " DESC LIMIT 1",
         username
     );
     return rows.isEmpty() ? null : rows.get(0);
@@ -177,7 +214,8 @@ public class FeedbackDatabaseService {
             "LEFT JOIN department d ON d.id = u.department_id " +
             "LEFT JOIN user_role ur ON ur.user_id = u.id " +
             "LEFT JOIN role r ON r.id = ur.role_id " +
-            "WHERE u.id = ? LIMIT 1",
+            "WHERE u.id = ? " +
+            "ORDER BY " + ROLE_PRIORITY_SQL + " DESC LIMIT 1",
         id
     );
     return rows.isEmpty() ? null : rows.get(0);
@@ -209,6 +247,49 @@ public class FeedbackDatabaseService {
     return findUserById(asLong(existing.get("id"), 0L));
   }
 
+  public Map<String, Object> bindAcademicStudentProfile(String username, Map<String, Object> profile) {
+    Map<String, Object> user = ensureAcademicStudentUser(username);
+    if (profile == null || profile.isEmpty()) {
+      return user;
+    }
+
+    String realName = firstText(profile, "xm", "xsmc", "name", "realName", "studentName", "姓名");
+    String departmentName = firstText(profile, "xy", "xymc", "xyxm", "academy", "academyName", "departmentName", "院系", "学院");
+    String majorName = firstText(profile, "zy", "zymc", "major", "majorName", "专业");
+    String className = firstText(profile, "bj", "bjmc", "xzb", "className", "行政班", "班级");
+
+    Long majorId = majorName.isBlank() ? null : queryId("SELECT id FROM major WHERE name = ? LIMIT 1", majorName);
+    Long departmentId = null;
+    if (!departmentName.isBlank()) {
+      departmentId = findOrCreateDepartment(departmentName);
+    } else if (majorId != null) {
+      departmentId = queryId("SELECT department_id FROM major WHERE id = ? LIMIT 1", majorId);
+    }
+
+    if (departmentId == null && (!majorName.isBlank() || !className.isBlank())) {
+      departmentId = findOrCreateDepartment(departmentName);
+    }
+    if (departmentId == null) {
+      if (!realName.isBlank()) {
+        db.update("UPDATE app_user SET real_name = ? WHERE username = ?", realName, username);
+        return findUserByUsername(username);
+      }
+      return user;
+    }
+
+    if (majorId == null) {
+      majorId = majorName.isBlank() ? findOrCreateMajor(departmentId) : findOrCreateMajor(departmentId, majorName);
+    }
+    Long classGroupId = className.isBlank() ? null : findOrCreateClassGroup(majorId, className);
+    String savedRealName = realName.isBlank() ? textOrDefault(user.get("realName"), username) : realName;
+    if (classGroupId == null) {
+      db.update("UPDATE app_user SET real_name = ?, department_id = ? WHERE username = ?", savedRealName, departmentId, username);
+    } else {
+      db.update("UPDATE app_user SET real_name = ?, department_id = ?, class_group_id = ? WHERE username = ?", savedRealName, departmentId, classGroupId, username);
+    }
+    return findUserByUsername(username);
+  }
+
   public List<Map<String, Object>> users(Map<String, Object> user) {
     String where = "";
     Object[] args = new Object[] {};
@@ -222,16 +303,120 @@ public class FeedbackDatabaseService {
     }
 
     return db.queryForList(
-        "SELECT u.id, u.username, u.real_name AS realName, u.user_type AS userType, u.status, " +
+        "SELECT u.id, u.username, u.real_name AS realName, u.user_type AS userType, " +
+            "u.department_id AS departmentId, u.class_group_id AS classGroupId, u.status, " +
             "d.name AS departmentName, cg.name AS className, r.role_key AS role, r.role_name AS roleName " +
             "FROM app_user u " +
             "LEFT JOIN department d ON d.id = u.department_id " +
             "LEFT JOIN class_group cg ON cg.id = u.class_group_id " +
-            "LEFT JOIN user_role ur ON ur.user_id = u.id " +
+            "LEFT JOIN user_role ur ON ur.user_id = u.id AND ur.role_id = (" +
+            "SELECT ur2.role_id FROM user_role ur2 JOIN role r2 ON r2.id = ur2.role_id " +
+            "WHERE ur2.user_id = u.id ORDER BY " + ROLE_PRIORITY_SQL_R2 + " DESC LIMIT 1" +
+            ") " +
             "LEFT JOIN role r ON r.id = ur.role_id " +
-            where + " ORDER BY u.id DESC",
+            where + " GROUP BY u.id, u.username, u.real_name, u.user_type, u.department_id, u.class_group_id, u.status, d.name, cg.name, r.role_key, r.role_name " +
+            "ORDER BY u.id DESC",
         args
     );
+  }
+
+  public Map<String, Object> updateUserAuthorization(Long targetUserId, Map<String, Object> payload, Map<String, Object> operator) {
+    Map<String, Object> target = findUserById(targetUserId);
+    if (target == null) {
+      throw new IllegalArgumentException("用户不存在");
+    }
+    if (isDepartmentAdmin(operator)) {
+      Long operatorDepartmentId = departmentId(operator);
+      Long targetDepartmentId = asLong(target.get("departmentId"), null);
+      if (targetDepartmentId != null && !targetDepartmentId.equals(operatorDepartmentId)) {
+        throw new IllegalArgumentException("只能维护本院系用户");
+      }
+    }
+
+    String roleKey = asString(payload.get("role"));
+    if (!roleKey.isBlank()) {
+      if (!Arrays.asList("STUDENT", "CLASS_REPRESENTATIVE", "DEPARTMENT_ADMIN").contains(roleKey) && !isSuperAdmin(operator)) {
+        throw new IllegalArgumentException("无权授予该角色");
+      }
+      if ("SUPER_ADMIN".equals(roleKey)) {
+        throw new IllegalArgumentException("不能在页面中授予超管角色");
+      }
+      Long roleId = ensureRole(roleKey, roleName(roleKey));
+      db.update("DELETE FROM user_role WHERE user_id = ?", targetUserId);
+      insert("INSERT INTO user_role (user_id, role_id) VALUES (?, ?)", targetUserId, roleId);
+    }
+
+    Long departmentId = asLong(payload.get("departmentId"), null);
+    Long classGroupId = asLong(payload.get("classGroupId"), null);
+    String realName = asString(payload.get("realName"));
+    if (classGroupId != null && classGroupId > 0) {
+      Long classDepartmentId = queryId(
+          "SELECT m.department_id FROM class_group cg JOIN major m ON m.id = cg.major_id WHERE cg.id = ? LIMIT 1",
+          classGroupId
+      );
+      if (classDepartmentId != null) {
+        departmentId = classDepartmentId;
+      }
+    }
+    if (isDepartmentAdmin(operator) && departmentId != null && !departmentId.equals(departmentId(operator))) {
+      throw new IllegalArgumentException("只能绑定本院系用户");
+    }
+
+    db.update(
+        "UPDATE app_user SET real_name = ?, department_id = ?, class_group_id = ? WHERE id = ?",
+        realName.isBlank() ? asString(target.get("realName")) : realName,
+        departmentId,
+        classGroupId,
+        targetUserId
+    );
+    String status = asString(payload.get("status"));
+    if (Arrays.asList("ACTIVE", "DISABLED").contains(status)) {
+      db.update("UPDATE app_user SET status = ? WHERE id = ?", status, targetUserId);
+    }
+    return findUserById(targetUserId);
+  }
+
+  @SuppressWarnings("unchecked")
+  public Map<String, Object> importUsers(Map<String, Object> payload, Map<String, Object> operator) {
+    List<Map<String, Object>> rows = (List<Map<String, Object>>) payload.getOrDefault("rows", Collections.emptyList());
+    int importedCount = 0;
+    int skippedCount = 0;
+    for (Map<String, Object> row : rows) {
+      String username = firstText(row, "username", "account", "studentNo", "学号", "账号");
+      if (username.isBlank()) {
+        skippedCount += 1;
+        continue;
+      }
+      String realName = firstText(row, "realName", "name", "姓名");
+      String departmentName = firstText(row, "departmentName", "院系", "学院");
+      String majorName = firstText(row, "majorName", "专业");
+      String className = firstText(row, "className", "班级", "行政班");
+      String role = normalizeRole(firstText(row, "role", "角色"));
+      String status = normalizeUserStatus(firstText(row, "status", "状态"));
+
+      Long departmentId = departmentName.isBlank() ? null : findOrCreateDepartment(departmentName);
+      Long majorId = null;
+      Long classGroupId = null;
+      if (departmentId != null) {
+        majorId = majorName.isBlank() ? findOrCreateMajor(departmentId) : findOrCreateMajor(departmentId, majorName);
+        if (!className.isBlank()) {
+          classGroupId = findOrCreateClassGroup(majorId, className);
+        }
+      }
+      Map<String, Object> user = ensureAcademicStudentUser(username);
+      Map<String, Object> auth = new HashMap<>();
+      auth.put("realName", realName.isBlank() ? username : realName);
+      auth.put("departmentId", departmentId);
+      auth.put("classGroupId", classGroupId);
+      auth.put("role", role);
+      auth.put("status", status);
+      updateUserAuthorization(asLong(user.get("id"), 0L), auth, operator);
+      importedCount += 1;
+    }
+    Map<String, Object> result = new HashMap<>();
+    result.put("importedCount", importedCount);
+    result.put("skippedCount", skippedCount);
+    return result;
   }
 
   public Map<String, Object> dashboardSummary(Map<String, Object> user) {
@@ -384,6 +569,92 @@ public class FeedbackDatabaseService {
     );
   }
 
+  public List<Map<String, Object>> weeklyTaskCourseItems(Map<String, Object> user) {
+    Scope scope = taskScope(user, "m", "wft");
+    List<Map<String, Object>> tasks = db.queryForList(
+        "SELECT wft.id AS taskId, wft.term_id AS termId, wft.week_no AS weekNo, " +
+            "wft.class_group_id AS classGroupId, cg.name AS className, d.name AS departmentName, " +
+            "DATE_FORMAT(wft.deadline, '%Y-%m-%d %H:%i:%s') AS deadline, wft.status AS taskStatus " +
+            "FROM weekly_feedback_task wft " +
+            "JOIN class_group cg ON cg.id = wft.class_group_id " +
+            "JOIN major m ON m.id = cg.major_id " +
+            "JOIN department d ON d.id = m.department_id " +
+            scope.where + " ORDER BY wft.week_no DESC, wft.id DESC",
+        scope.args
+    );
+
+    List<Map<String, Object>> items = new ArrayList<>();
+    for (Map<String, Object> task : tasks) {
+      items.addAll(weeklyTaskCourseItemsForTask(task, user));
+    }
+    return items;
+  }
+
+  private List<Map<String, Object>> weeklyTaskCourseItemsForTask(Map<String, Object> task, Map<String, Object> user) {
+    Long taskId = asLong(task.get("taskId"), 0L);
+    Long termId = asLong(task.get("termId"), 0L);
+    Long classGroupId = asLong(task.get("classGroupId"), 0L);
+    Integer weekNo = asInteger(task.get("weekNo"), 1);
+    String deadline = asString(task.get("deadline"));
+    List<Map<String, Object>> teachingRows = db.queryForList(
+        "SELECT tt.id AS teachingTaskId, tt.week_range AS weekRange, tt.guidance_mode AS guidanceMode, " +
+            "tt.planned_teacher_name AS plannedTeacherName, tt.actual_teacher_name AS actualTeacherName, " +
+            "tt.classroom, c.id AS courseId, c.course_name AS courseName, c.department_id AS courseDepartmentId, " +
+            "d.name AS teacherDepartmentName, t.id AS teacherId, COALESCE(t.teacher_name, tt.actual_teacher_name, tt.planned_teacher_name) AS teacherName " +
+            "FROM teaching_task tt " +
+            "JOIN course c ON c.id = tt.course_id " +
+            "LEFT JOIN department d ON d.id = c.department_id " +
+            "LEFT JOIN teacher t ON t.id = tt.teacher_id " +
+            "WHERE tt.term_id = ? AND tt.class_group_id = ? " +
+            "ORDER BY COALESCE(tt.day_index, 99), COALESCE(tt.section_index, 99), tt.id",
+        termId,
+        classGroupId
+    );
+    if (teachingRows.isEmpty()) {
+      teachingRows = mockTeachingRowsForTask(task);
+    }
+
+    List<Map<String, Object>> items = new ArrayList<>();
+    for (Map<String, Object> teaching : teachingRows) {
+      if (!includesWeek(asString(teaching.get("weekRange")), weekNo)) {
+        continue;
+      }
+      Long courseId = asLong(teaching.get("courseId"), 0L);
+      Map<String, Object> feedback = latestWeeklyFeedback(taskId, courseId, isSuperAdmin(user) || isDepartmentAdmin(user) ? null : userId(user));
+      Integer wordCount = feedback == null ? 0 : asInteger(feedback.get("feedbackWordCount"), 0);
+      String status = feedback == null
+          ? (isOverdue(deadline) ? "OVERDUE_MISSING" : "PENDING")
+          : (isLate(asString(feedback.get("submittedAt")), deadline) ? "LATE_SUBMITTED" : "SUBMITTED");
+      Map<String, Object> item = new LinkedHashMap<>();
+      item.put("taskId", taskId);
+      item.put("termId", termId);
+      item.put("weekNo", weekNo);
+      item.put("classGroupId", classGroupId);
+      item.put("className", task.get("className"));
+      item.put("departmentName", task.get("departmentName"));
+      item.put("deadline", deadline);
+      item.put("teachingTaskId", teaching.get("teachingTaskId"));
+      item.put("courseId", courseId);
+      item.put("courseName", teaching.get("courseName"));
+      item.put("teacherId", teaching.get("teacherId"));
+      item.put("teacherName", teaching.get("teacherName"));
+      item.put("plannedTeacherName", teaching.get("plannedTeacherName"));
+      item.put("actualTeacherName", teaching.get("actualTeacherName"));
+      item.put("teacherDepartmentName", teaching.get("teacherDepartmentName"));
+      item.put("weekRange", teaching.get("weekRange"));
+      item.put("guidanceMode", teaching.get("guidanceMode"));
+      item.put("classroom", teaching.get("classroom"));
+      item.put("feedbackId", feedback == null ? null : feedback.get("id"));
+      item.put("submittedAt", feedback == null ? null : feedback.get("submittedAt"));
+      item.put("feedbackWordCount", wordCount);
+      item.put("itemStatus", status);
+      item.put("qualityStatus", feedback == null ? "MISSING" : (wordCount < 20 ? "LOW_QUALITY" : "NORMAL"));
+      item.put("qualityRemark", feedback == null ? "该课程尚未提交反馈" : (wordCount < 20 ? "字数偏少，疑似应付反馈" : "反馈内容达标"));
+      items.add(item);
+    }
+    return items;
+  }
+
   public List<Map<String, Object>> generateWeeklyTasks(Map<String, Object> payload) {
     Long termId = asLong(payload.get("termId"), 1L);
     Integer weekNo = asInteger(payload.get("weekNo"), 1);
@@ -509,6 +780,7 @@ public class FeedbackDatabaseService {
             "wf.planned_teacher_name AS plannedTeacherName, wf.actual_teacher_name AS actualTeacherName, " +
             "wf.week_range AS weekRange, wf.assignment_assessment AS assignmentAssessment, " +
             "wf.guidance_mode AS guidanceMode, wf.learning_outcome AS learningOutcome, " +
+            "wf.content_arrangement_eval AS contentArrangementEval, wf.co_teacher_evaluation AS coTeacherEvaluation, " +
             "wf.issue_suggestion AS issueSuggestion, wf.hardware_issue AS hardwareIssue, wf.remark, " +
             "wf.need_reply AS needReply, wf.status, " +
             "CHAR_LENGTH(CONCAT(IFNULL(wf.learning_outcome, ''), IFNULL(wf.issue_suggestion, ''), IFNULL(wf.hardware_issue, ''), IFNULL(wf.co_teacher_evaluation, ''))) AS feedbackWordCount, " +
@@ -527,26 +799,64 @@ public class FeedbackDatabaseService {
   }
 
   public Map<String, Object> createWeeklyFeedback(Map<String, Object> feedback) {
-    Long id = insert(
-        "INSERT INTO weekly_feedback (task_id, student_id, course_id, teacher_id, planned_teacher_name, actual_teacher_name, class_group_name, week_range, assignment_assessment, guidance_mode, learning_outcome, content_arrangement_eval, co_teacher_evaluation, issue_suggestion, hardware_issue, remark, need_reply, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SUBMITTED')",
-        asLong(feedback.get("taskId"), 1L),
-        asLong(feedback.get("studentId"), 3L),
-        asLong(feedback.get("courseId"), 1L),
-        asLong(feedback.get("teacherId"), null),
-        asString(feedback.get("plannedTeacherName")),
-        asString(feedback.get("actualTeacherName")),
-        asString(feedback.get("classGroupName")),
-        asString(feedback.get("weekRange")),
-        asString(feedback.get("assignmentAssessment")),
-        asString(feedback.get("guidanceMode")),
-        asString(feedback.get("learningOutcome")),
-        asString(feedback.get("contentArrangementEval")),
-        asString(feedback.get("coTeacherEvaluation")),
-        asString(feedback.get("issueSuggestion")),
-        asString(feedback.get("hardwareIssue")),
-        asString(feedback.get("remark")),
-        asBoolean(feedback.get("needReply")) ? 1 : 0
+    Long taskId = asLong(feedback.get("taskId"), 1L);
+    Long studentId = asLong(feedback.get("studentId"), 3L);
+    Long courseId = asLong(feedback.get("courseId"), 1L);
+    Long existingId = queryId(
+        "SELECT id FROM weekly_feedback WHERE task_id = ? AND student_id = ? AND course_id = ? ORDER BY id DESC LIMIT 1",
+        taskId,
+        studentId,
+        courseId
     );
+    Long id;
+    if (existingId == null) {
+      id = insert(
+          "INSERT INTO weekly_feedback (task_id, student_id, course_id, teacher_id, planned_teacher_name, actual_teacher_name, class_group_name, week_range, assignment_assessment, guidance_mode, learning_outcome, content_arrangement_eval, co_teacher_evaluation, issue_suggestion, hardware_issue, remark, need_reply, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'SUBMITTED')",
+          taskId,
+          studentId,
+          courseId,
+          asLong(feedback.get("teacherId"), null),
+          asString(feedback.get("plannedTeacherName")),
+          asString(feedback.get("actualTeacherName")),
+          asString(feedback.get("classGroupName")),
+          asString(feedback.get("weekRange")),
+          asString(feedback.get("assignmentAssessment")),
+          asString(feedback.get("guidanceMode")),
+          asString(feedback.get("learningOutcome")),
+          asString(feedback.get("contentArrangementEval")),
+          asString(feedback.get("coTeacherEvaluation")),
+          asString(feedback.get("issueSuggestion")),
+          asString(feedback.get("hardwareIssue")),
+          asString(feedback.get("remark")),
+          asBoolean(feedback.get("needReply")) ? 1 : 0
+      );
+    } else {
+      id = existingId;
+      db.update(
+          "UPDATE weekly_feedback SET teacher_id = ?, planned_teacher_name = ?, actual_teacher_name = ?, class_group_name = ?, " +
+              "week_range = ?, assignment_assessment = ?, guidance_mode = ?, learning_outcome = ?, content_arrangement_eval = ?, " +
+              "co_teacher_evaluation = ?, issue_suggestion = ?, hardware_issue = ?, remark = ?, need_reply = ?, status = 'SUBMITTED', created_at = NOW() " +
+              "WHERE id = ?",
+          asLong(feedback.get("teacherId"), null),
+          asString(feedback.get("plannedTeacherName")),
+          asString(feedback.get("actualTeacherName")),
+          asString(feedback.get("classGroupName")),
+          asString(feedback.get("weekRange")),
+          asString(feedback.get("assignmentAssessment")),
+          asString(feedback.get("guidanceMode")),
+          asString(feedback.get("learningOutcome")),
+          asString(feedback.get("contentArrangementEval")),
+          asString(feedback.get("coTeacherEvaluation")),
+          asString(feedback.get("issueSuggestion")),
+          asString(feedback.get("hardwareIssue")),
+          asString(feedback.get("remark")),
+          asBoolean(feedback.get("needReply")) ? 1 : 0,
+          id
+      );
+    }
+    db.update("UPDATE weekly_feedback_task SET status = 'IN_PROGRESS' WHERE id = ? AND status = 'PENDING'", taskId);
+    updateWeeklyTaskCompletion(taskId, studentId);
+    db.update("DELETE FROM feedback_flag WHERE feedback_type = 'WEEKLY' AND feedback_id = ?", id);
     markSensitiveTerms("WEEKLY", id, Arrays.asList(
         asString(feedback.get("learningOutcome")),
         asString(feedback.get("contentArrangementEval")),
@@ -559,6 +869,35 @@ public class FeedbackDatabaseService {
     created.put("id", id);
     created.put("status", "SUBMITTED");
     return created;
+  }
+
+  public boolean canSubmitWeeklyFeedbackForCourse(Map<String, Object> feedback, Map<String, Object> user) {
+    if (!Arrays.asList("STUDENT", "CLASS_REPRESENTATIVE").contains(role(user))) {
+      return false;
+    }
+    Long taskId = asLong(feedback.get("taskId"), null);
+    Long courseId = asLong(feedback.get("courseId"), null);
+    Long classGroupId = classGroupId(user);
+    if (taskId == null || courseId == null || classGroupId == null || classGroupId <= 0) {
+      return false;
+    }
+    List<Map<String, Object>> tasks = db.queryForList(
+        "SELECT wft.id AS taskId, wft.term_id AS termId, wft.week_no AS weekNo, " +
+            "wft.class_group_id AS classGroupId, cg.name AS className, d.name AS departmentName, " +
+            "DATE_FORMAT(wft.deadline, '%Y-%m-%d %H:%i:%s') AS deadline, wft.status AS taskStatus " +
+            "FROM weekly_feedback_task wft " +
+            "JOIN class_group cg ON cg.id = wft.class_group_id " +
+            "JOIN major m ON m.id = cg.major_id " +
+            "JOIN department d ON d.id = m.department_id " +
+            "WHERE wft.id = ? AND wft.class_group_id = ? LIMIT 1",
+        taskId,
+        classGroupId
+    );
+    if (tasks.isEmpty()) {
+      return false;
+    }
+    return weeklyTaskCourseItemsForTask(tasks.get(0), user).stream()
+        .anyMatch(item -> courseId.equals(asLong(item.get("courseId"), null)));
   }
 
   public List<Map<String, Object>> realtimeFeedbacks(Map<String, Object> user) {
@@ -582,10 +921,16 @@ public class FeedbackDatabaseService {
   public Map<String, Object> createRealtimeFeedback(Map<String, Object> feedback) {
     boolean needReply = asBoolean(feedback.get("needReply"));
     String status = needReply ? "PENDING_REPLY" : "SUBMITTED";
+    Long studentId = asLong(feedback.get("studentId"), 1L);
+    Long departmentId = asLong(feedback.get("departmentId"), null);
+    if (departmentId == null || departmentId <= 0) {
+      Map<String, Object> student = findUserById(studentId);
+      departmentId = resolveUserDepartmentId(student);
+    }
     Long id = insert(
         "INSERT INTO realtime_feedback (student_id, department_id, feedback_type, title, content, location_text, need_reply, urgency_level, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        asLong(feedback.get("studentId"), 1L),
-        asLong(feedback.get("departmentId"), null),
+        studentId,
+        departmentId,
         asString(feedback.get("type")),
         asString(feedback.get("title")),
         asString(feedback.get("content")),
@@ -601,8 +946,79 @@ public class FeedbackDatabaseService {
     ));
     Map<String, Object> created = new HashMap<>(feedback);
     created.put("id", id);
+    created.put("departmentId", departmentId);
     created.put("status", status);
     return created;
+  }
+
+  public Map<String, Object> updateRealtimeFeedback(Long feedbackId, Map<String, Object> feedback, Map<String, Object> user) {
+    if (!canModifyRealtimeFeedback(feedbackId, user)) {
+      throw new IllegalArgumentException("只能修改本人尚未处理的实时反馈");
+    }
+    boolean needReply = asBoolean(feedback.get("needReply"));
+    String status = needReply ? "PENDING_REPLY" : "SUBMITTED";
+    db.update(
+        "UPDATE realtime_feedback SET feedback_type = ?, title = ?, content = ?, location_text = ?, need_reply = ?, urgency_level = ?, status = ? WHERE id = ?",
+        asString(feedback.get("type")),
+        asString(feedback.get("title")),
+        asString(feedback.get("content")),
+        asString(feedback.get("locationText")),
+        needReply ? 1 : 0,
+        asString(feedback.get("urgencyLevel")).isBlank() ? "MEDIUM" : asString(feedback.get("urgencyLevel")),
+        status,
+        feedbackId
+    );
+    db.update("DELETE FROM feedback_flag WHERE feedback_type = 'REALTIME' AND feedback_id = ?", feedbackId);
+    markSensitiveTerms("REALTIME", feedbackId, Arrays.asList(
+        asString(feedback.get("title")),
+        asString(feedback.get("content")),
+        asString(feedback.get("locationText"))
+    ));
+    return realtimeFeedbackById(feedbackId);
+  }
+
+  public Map<String, Object> deleteRealtimeFeedback(Long feedbackId, Map<String, Object> user) {
+    if (!canModifyRealtimeFeedback(feedbackId, user)) {
+      throw new IllegalArgumentException("只能删除本人尚未处理的实时反馈");
+    }
+    db.update("DELETE FROM feedback_flag WHERE feedback_type = 'REALTIME' AND feedback_id = ?", feedbackId);
+    db.update("DELETE FROM realtime_feedback WHERE id = ?", feedbackId);
+    Map<String, Object> result = new HashMap<>();
+    result.put("id", feedbackId);
+    result.put("deleted", true);
+    return result;
+  }
+
+  private boolean canModifyRealtimeFeedback(Long feedbackId, Map<String, Object> user) {
+    return count(
+        "SELECT COUNT(*) FROM realtime_feedback WHERE id = ? AND student_id = ? AND status IN ('SUBMITTED', 'PENDING_REPLY')",
+        feedbackId,
+        userId(user)
+    ) > 0;
+  }
+
+  private Map<String, Object> realtimeFeedbackById(Long feedbackId) {
+    List<Map<String, Object>> rows = db.queryForList(
+        "SELECT id, feedback_type AS type, title, content, location_text AS locationText, urgency_level AS urgencyLevel, status, need_reply AS needReply, DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS createdAt FROM realtime_feedback WHERE id = ?",
+        feedbackId
+    );
+    return rows.isEmpty() ? Map.of("id", feedbackId) : rows.get(0);
+  }
+
+  public Long resolveUserDepartmentId(Map<String, Object> user) {
+    Long explicitDepartmentId = departmentId(user);
+    if (explicitDepartmentId != null && explicitDepartmentId > 0) {
+      return explicitDepartmentId;
+    }
+    Long classGroupId = classGroupId(user);
+    if (classGroupId == null || classGroupId <= 0) {
+      return null;
+    }
+    Long inferred = queryId(
+        "SELECT m.department_id FROM class_group cg JOIN major m ON m.id = cg.major_id WHERE cg.id = ? LIMIT 1",
+        classGroupId
+    );
+    return inferred == null || inferred <= 0 ? null : inferred;
   }
 
   public List<Map<String, Object>> feedbackReplies(String feedbackType, Long feedbackId) {
@@ -721,7 +1137,7 @@ public class FeedbackDatabaseService {
 
   public List<Map<String, Object>> weeklyTaskCompliance(Map<String, Object> user) {
     Scope scope = taskScope(user, "m", "wft");
-    return db.queryForList(
+    List<Map<String, Object>> rows = db.queryForList(
         "SELECT " +
             "wft.id AS taskId, wft.week_no AS weekNo, d.name AS departmentName, cg.name AS className, " +
             "monitor.id AS monitorUserId, monitor.real_name AS monitorName, " +
@@ -749,6 +1165,189 @@ public class FeedbackDatabaseService {
             "ORDER BY wft.week_no DESC, wft.id DESC",
         scope.args
     );
+    for (Map<String, Object> row : rows) {
+      List<Map<String, Object>> items = weeklyTaskCourseItemsForTask(row, user);
+      int total = items.size();
+      long submitted = items.stream().filter(item -> item.get("feedbackId") != null).count();
+      long missing = total - submitted;
+      long lowQuality = items.stream().filter(item -> "LOW_QUALITY".equals(asString(item.get("qualityStatus")))).count();
+      row.put("totalCourseCount", total);
+      row.put("submittedCourseCount", submitted);
+      row.put("missingCourseCount", missing);
+      row.put("lowQualityCount", lowQuality);
+      if (total > 0 && missing == 0) {
+        row.put("complianceStatus", lowQuality > 0 ? "SUBMITTED_WITH_LOW_QUALITY" : "SUBMITTED");
+      } else if (missing > 0 && isOverdue(asString(row.get("deadline")))) {
+        row.put("complianceStatus", "OVERDUE_MISSING");
+      } else if (missing > 0) {
+        row.put("complianceStatus", "PENDING");
+      }
+      row.put("qualityRemark", missing > 0
+          ? "仍有 " + missing + " 门课未反馈"
+          : (lowQuality > 0 ? lowQuality + " 门课字数偏少" : "本周逐门反馈完成"));
+    }
+    return rows;
+  }
+
+  public Map<String, Object> weeklyFeedbackAnalytics(Map<String, Object> user) {
+    Map<String, Object> result = new LinkedHashMap<>();
+    result.put("byClass", aggregateWeeklyFeedback(user, "cg.id", "cg.name", "className"));
+    result.put("byCourse", aggregateWeeklyFeedback(user, "c.id", "c.course_name", "courseName"));
+    result.put("byTeacher", aggregateWeeklyFeedback(user, "COALESCE(wf.teacher_id, 0)", "COALESCE(t.teacher_name, wf.actual_teacher_name, wf.planned_teacher_name, '待确认教师')", "teacherName"));
+    return result;
+  }
+
+  public List<Map<String, Object>> weeklyFeedbackSummaries(Map<String, Object> user) {
+    Scope scope = weeklyFeedbackScope(user, "m", "wf");
+    List<Map<String, Object>> rows = db.queryForList(
+        "SELECT COALESCE(t.teacher_name, wf.actual_teacher_name, wf.planned_teacher_name, '待确认教师') AS teacherName, " +
+            "c.course_name AS courseName, wf.class_group_name AS className, " +
+            "wf.learning_outcome AS learningOutcome, wf.content_arrangement_eval AS contentArrangementEval, " +
+            "wf.co_teacher_evaluation AS coTeacherEvaluation, wf.issue_suggestion AS issueSuggestion, " +
+            "wf.hardware_issue AS hardwareIssue, wf.remark, " +
+            "COUNT(ff.id) AS sensitiveFlagCount " +
+            "FROM weekly_feedback wf " +
+            "LEFT JOIN weekly_feedback_task wft ON wft.id = wf.task_id " +
+            "LEFT JOIN class_group cg ON cg.id = wft.class_group_id " +
+            "LEFT JOIN major m ON m.id = cg.major_id " +
+            "LEFT JOIN course c ON c.id = wf.course_id " +
+            "LEFT JOIN teacher t ON t.id = wf.teacher_id " +
+            "LEFT JOIN feedback_flag ff ON ff.feedback_type = 'WEEKLY' AND ff.feedback_id = wf.id " +
+            scope.where + " GROUP BY wf.id, teacherName, courseName, className, wf.learning_outcome, wf.content_arrangement_eval, wf.co_teacher_evaluation, wf.issue_suggestion, wf.hardware_issue, wf.remark " +
+            "ORDER BY MAX(wf.created_at) DESC, wf.id DESC",
+        scope.args
+    );
+    Map<String, Map<String, Object>> groups = new LinkedHashMap<>();
+    for (Map<String, Object> row : rows) {
+      String key = asString(row.get("teacherName")) + "||" + asString(row.get("courseName"));
+      Map<String, Object> group = groups.computeIfAbsent(key, ignored -> {
+        Map<String, Object> next = new LinkedHashMap<>();
+        next.put("teacherName", asString(row.get("teacherName")));
+        next.put("courseName", asString(row.get("courseName")));
+        next.put("classes", new ArrayList<String>());
+        next.put("feedbackCount", 0);
+        next.put("sensitiveFlagCount", 0);
+        next.put("positivePoints", new ArrayList<String>());
+        next.put("issues", new ArrayList<String>());
+        next.put("hardwareIssues", new ArrayList<String>());
+        return next;
+      });
+      ((List<String>) group.get("classes")).add(asString(row.get("className")));
+      group.put("feedbackCount", asInteger(group.get("feedbackCount"), 0) + 1);
+      group.put("sensitiveFlagCount", asInteger(group.get("sensitiveFlagCount"), 0) + asInteger(row.get("sensitiveFlagCount"), 0));
+      appendIfUseful((List<String>) group.get("positivePoints"), row.get("learningOutcome"));
+      appendIfUseful((List<String>) group.get("positivePoints"), row.get("contentArrangementEval"));
+      appendIfUseful((List<String>) group.get("positivePoints"), row.get("coTeacherEvaluation"));
+      appendIfUseful((List<String>) group.get("issues"), row.get("issueSuggestion"));
+      appendIfUseful((List<String>) group.get("hardwareIssues"), row.get("hardwareIssue"));
+      appendIfUseful((List<String>) group.get("issues"), row.get("remark"));
+    }
+    List<Map<String, Object>> result = new ArrayList<>();
+    for (Map<String, Object> group : groups.values()) {
+      List<String> classes = uniqueStrings((List<String>) group.get("classes"));
+      List<String> positives = uniqueStrings((List<String>) group.get("positivePoints"));
+      List<String> issues = uniqueStrings((List<String>) group.get("issues"));
+      List<String> hardware = uniqueStrings((List<String>) group.get("hardwareIssues"));
+      int sensitiveCount = asInteger(group.get("sensitiveFlagCount"), 0);
+      String riskLevel = sensitiveCount > 0 || !hardware.isEmpty() ? "HIGH" : (!issues.isEmpty() ? "MEDIUM" : "LOW");
+      group.put("classes", String.join("、", classes));
+      group.put("positiveSummary", positives.isEmpty() ? "暂无明显正向反馈" : String.join("；", positives));
+      group.put("issueSummary", issues.isEmpty() ? "暂无集中问题" : String.join("；", issues));
+      group.put("hardwareSummary", hardware.isEmpty() ? "暂无硬件问题" : String.join("；", hardware));
+      group.put("riskLevel", riskLevel);
+      group.put("modelSummary", buildRuleBasedSummary(group));
+      result.add(group);
+    }
+    return result;
+  }
+
+  private Map<String, Object> latestWeeklyFeedback(Long taskId, Long courseId, Long studentId) {
+    String studentFilter = studentId == null ? "" : " AND wf.student_id = ?";
+    Object[] args = studentId == null
+        ? new Object[] {taskId, courseId}
+        : new Object[] {taskId, courseId, studentId};
+    List<Map<String, Object>> rows = db.queryForList(
+        "SELECT wf.id, DATE_FORMAT(wf.created_at, '%Y-%m-%d %H:%i:%s') AS submittedAt, " +
+            "CHAR_LENGTH(CONCAT(IFNULL(wf.learning_outcome, ''), IFNULL(wf.issue_suggestion, ''), IFNULL(wf.hardware_issue, ''), IFNULL(wf.co_teacher_evaluation, ''))) AS feedbackWordCount " +
+            "FROM weekly_feedback wf WHERE wf.task_id = ? AND wf.course_id = ?" + studentFilter + " ORDER BY wf.created_at DESC, wf.id DESC LIMIT 1",
+        args
+    );
+    return rows.isEmpty() ? null : rows.get(0);
+  }
+
+  private List<Map<String, Object>> mockTeachingRowsForTask(Map<String, Object> task) {
+    List<Map<String, Object>> courses = db.queryForList(
+        "SELECT c.id AS courseId, c.course_name AS courseName, c.department_id AS courseDepartmentId, " +
+            "d.name AS teacherDepartmentName FROM course c LEFT JOIN department d ON d.id = c.department_id ORDER BY c.id ASC LIMIT 4"
+    );
+    List<Map<String, Object>> rows = new ArrayList<>();
+    int index = 0;
+    for (Map<String, Object> course : courses) {
+      Map<String, Object> row = new LinkedHashMap<>(course);
+      row.put("teachingTaskId", null);
+      row.put("teacherId", null);
+      row.put("teacherName", "模拟教师" + (index + 1));
+      row.put("plannedTeacherName", row.get("teacherName"));
+      row.put("actualTeacherName", row.get("teacherName"));
+      row.put("weekRange", String.valueOf(task.get("weekNo")));
+      row.put("guidanceMode", index % 2 == 0 ? "线下" : "线上+线下");
+      row.put("classroom", "Mock-" + (index + 1) + "01");
+      rows.add(row);
+      index += 1;
+    }
+    return rows;
+  }
+
+  private void updateWeeklyTaskCompletion(Long taskId, Long studentId) {
+    List<Map<String, Object>> tasks = db.queryForList(
+        "SELECT wft.id AS taskId, wft.term_id AS termId, wft.week_no AS weekNo, wft.class_group_id AS classGroupId, cg.name AS className, DATE_FORMAT(wft.deadline, '%Y-%m-%d %H:%i:%s') AS deadline " +
+            "FROM weekly_feedback_task wft JOIN class_group cg ON cg.id = wft.class_group_id WHERE wft.id = ?",
+        taskId
+    );
+    if (tasks.isEmpty()) {
+      return;
+    }
+    List<Map<String, Object>> items = weeklyTaskCourseItemsForTask(tasks.get(0), Map.of("id", studentId, "role", "CLASS_REPRESENTATIVE"));
+    if (!items.isEmpty() && items.stream().allMatch(item -> item.get("feedbackId") != null)) {
+      db.update("UPDATE weekly_feedback_task SET status = 'SUBMITTED' WHERE id = ?", taskId);
+    }
+  }
+
+  private List<Map<String, Object>> aggregateWeeklyFeedback(Map<String, Object> user, String groupIdExpr, String groupNameExpr, String labelKey) {
+    Scope scope = weeklyFeedbackScope(user, "m", "wf");
+    return db.queryForList(
+        "SELECT " + groupIdExpr + " AS targetId, " + groupNameExpr + " AS " + labelKey + ", " +
+            "COUNT(DISTINCT wf.id) AS feedbackCount, " +
+            "COUNT(DISTINCT wf.student_id) AS participantCount, " +
+            "COUNT(DISTINCT CASE WHEN wf.need_reply = 1 THEN wf.id END) AS needReplyCount, " +
+            "COUNT(DISTINCT CASE WHEN CHAR_LENGTH(CONCAT(IFNULL(wf.learning_outcome, ''), IFNULL(wf.issue_suggestion, ''), IFNULL(wf.hardware_issue, ''), IFNULL(wf.co_teacher_evaluation, ''))) < 20 THEN wf.id END) AS lowQualityCount, " +
+            "COUNT(DISTINCT CASE WHEN ff.id IS NOT NULL THEN wf.id END) AS sensitiveFlagCount, " +
+            "MAX(DATE_FORMAT(wf.created_at, '%Y-%m-%d %H:%i:%s')) AS latestSubmittedAt " +
+            "FROM weekly_feedback wf " +
+            "LEFT JOIN weekly_feedback_task wft ON wft.id = wf.task_id " +
+            "LEFT JOIN class_group cg ON cg.id = wft.class_group_id " +
+            "LEFT JOIN major m ON m.id = cg.major_id " +
+            "LEFT JOIN course c ON c.id = wf.course_id " +
+            "LEFT JOIN teacher t ON t.id = wf.teacher_id " +
+            "LEFT JOIN feedback_flag ff ON ff.feedback_type = 'WEEKLY' AND ff.feedback_id = wf.id " +
+            scope.where + " GROUP BY targetId, " + labelKey + " ORDER BY feedbackCount DESC, targetId DESC",
+        scope.args
+    );
+  }
+
+  private boolean isOverdue(String deadline) {
+    if (deadline == null || deadline.isBlank()) {
+      return false;
+    }
+    return LocalDateTime.now().isAfter(LocalDateTime.parse(deadline, DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")));
+  }
+
+  private boolean isLate(String submittedAt, String deadline) {
+    if (submittedAt == null || submittedAt.isBlank() || deadline == null || deadline.isBlank()) {
+      return false;
+    }
+    DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+    return LocalDateTime.parse(submittedAt, formatter).isAfter(LocalDateTime.parse(deadline, formatter));
   }
 
   private void markSensitiveTerms(String feedbackType, Long feedbackId, List<String> values) {
@@ -773,6 +1372,85 @@ public class FeedbackDatabaseService {
     }
   }
 
+  private Map<String, Object> matchTeachingTask(Long classGroupId, Map<String, Object> row, Integer weekNo) {
+    String courseName = normalizeMatchText(firstText(row, "courseName", "name", "课程名称", "开课课程"));
+    if (courseName.isBlank()) {
+      return Collections.emptyMap();
+    }
+    List<Map<String, Object>> candidates = db.queryForList(
+        "SELECT tt.id, tt.week_range AS weekRange, tt.day_index AS dayIndex, tt.section_index AS sectionIndex, " +
+            "tt.classroom, tt.planned_teacher_name AS plannedTeacherName, tt.actual_teacher_name AS actualTeacherName, " +
+            "c.course_name AS courseName, COALESCE(t.teacher_name, tt.actual_teacher_name, tt.planned_teacher_name) AS teacherName " +
+            "FROM teaching_task tt " +
+            "JOIN course c ON c.id = tt.course_id " +
+            "LEFT JOIN teacher t ON t.id = tt.teacher_id " +
+            "WHERE tt.class_group_id = ?",
+        classGroupId
+    );
+    Integer day = asInteger(row.get("day"), null);
+    Integer serial = asInteger(row.get("serial"), null);
+    String classroom = normalizeMatchText(firstText(row, "classroom", "locationText", "教室"));
+    Map<String, Object> best = Collections.emptyMap();
+    int bestScore = 0;
+    for (Map<String, Object> candidate : candidates) {
+      String candidateCourse = normalizeMatchText(asString(candidate.get("courseName")));
+      if (candidateCourse.isBlank() || (!candidateCourse.contains(courseName) && !courseName.contains(candidateCourse))) {
+        continue;
+      }
+      int score = 20;
+      if (weekNo != null && includesWeek(asString(candidate.get("weekRange")), weekNo)) {
+        score += 8;
+      }
+      if (day != null && day.equals(asInteger(candidate.get("dayIndex"), null))) {
+        score += 4;
+      }
+      if (serial != null && serial.equals(asInteger(candidate.get("sectionIndex"), null))) {
+        score += 4;
+      }
+      String candidateClassroom = normalizeMatchText(asString(candidate.get("classroom")));
+      if (!classroom.isBlank() && !candidateClassroom.isBlank() && classroom.equals(candidateClassroom)) {
+        score += 3;
+      }
+      if (score > bestScore) {
+        best = candidate;
+        bestScore = score;
+      }
+    }
+    return bestScore >= 20 ? best : Collections.emptyMap();
+  }
+
+  private void appendIfUseful(List<String> target, Object value) {
+    String text = asString(value);
+    if (text.isBlank() || Arrays.asList("无", "暂无", "没有", "无问题").contains(text)) {
+      return;
+    }
+    target.add(text);
+  }
+
+  private List<String> uniqueStrings(List<String> values) {
+    return values.stream()
+        .map(this::asString)
+        .filter(value -> !value.isBlank())
+        .distinct()
+        .limit(6)
+        .collect(Collectors.toList());
+  }
+
+  private String buildRuleBasedSummary(Map<String, Object> group) {
+    StringBuilder builder = new StringBuilder();
+    builder.append(asString(group.get("courseName"))).append("（").append(asString(group.get("teacherName"))).append("）");
+    builder.append("共收到 ").append(group.get("feedbackCount")).append(" 条反馈。");
+    builder.append("教学反馈：").append(group.get("positiveSummary")).append("。");
+    builder.append("主要问题：").append(group.get("issueSummary")).append("。");
+    if (!"暂无硬件问题".equals(asString(group.get("hardwareSummary")))) {
+      builder.append("硬件问题：").append(group.get("hardwareSummary")).append("。");
+    }
+    if (asInteger(group.get("sensitiveFlagCount"), 0) > 0) {
+      builder.append("存在敏感标记，建议管理员优先核实。");
+    }
+    return builder.toString();
+  }
+
   private Long findOrCreateDepartment(String name) {
     String normalized = name.isBlank() ? "未归属院系" : name;
     Long existing = queryId("SELECT id FROM department WHERE name = ? LIMIT 1", normalized);
@@ -782,6 +1460,12 @@ public class FeedbackDatabaseService {
   private Long findOrCreateMajor(Long departmentId) {
     Long existing = queryId("SELECT id FROM major WHERE department_id = ? ORDER BY id ASC LIMIT 1", departmentId);
     return existing != null ? existing : insert("INSERT INTO major (department_id, code, name) VALUES (?, ?, ?)", departmentId, "MAJOR-" + System.currentTimeMillis(), "默认专业");
+  }
+
+  private Long findOrCreateMajor(Long departmentId, String name) {
+    String normalized = name.isBlank() ? "默认专业" : name;
+    Long existing = queryId("SELECT id FROM major WHERE department_id = ? AND name = ? LIMIT 1", departmentId, normalized);
+    return existing != null ? existing : insert("INSERT INTO major (department_id, code, name) VALUES (?, ?, ?)", departmentId, "MAJOR-" + System.currentTimeMillis(), normalized);
   }
 
   private Long findOrCreateClassGroup(Long majorId, String name) {
@@ -808,6 +1492,16 @@ public class FeedbackDatabaseService {
     return existing != null ? existing : insert("INSERT INTO teacher (department_id, teacher_no, teacher_name) VALUES (?, ?, ?)", departmentId, "T-" + System.currentTimeMillis(), normalized);
   }
 
+  private String normalizeMatchText(String value) {
+    return asString(value)
+        .toLowerCase(Locale.ROOT)
+        .replaceAll("\\s+", "")
+        .replace("（", "(")
+        .replace("）", ")")
+        .replace("，", ",")
+        .replace("。", ".");
+  }
+
   private Long queryId(String sql, Object... args) {
     List<Map<String, Object>> rows = db.queryForList(sql, args);
     if (rows.isEmpty()) {
@@ -819,6 +1513,44 @@ public class FeedbackDatabaseService {
   private Long ensureRole(String roleKey, String roleName) {
     Long existing = queryId("SELECT id FROM role WHERE role_key = ? LIMIT 1", roleKey);
     return existing != null ? existing : insert("INSERT INTO role (role_key, role_name) VALUES (?, ?)", roleKey, roleName);
+  }
+
+  private String roleName(String roleKey) {
+    if ("SUPER_ADMIN".equals(roleKey)) {
+      return "超管员";
+    }
+    if ("DEPARTMENT_ADMIN".equals(roleKey)) {
+      return "院系管理员";
+    }
+    if ("CLASS_REPRESENTATIVE".equals(roleKey)) {
+      return "学委";
+    }
+    return "普通学生";
+  }
+
+  private String normalizeRole(String value) {
+    String role = asString(value);
+    if (role.isBlank() || "普通学生".equals(role)) {
+      return "STUDENT";
+    }
+    if ("学委".equals(role)) {
+      return "CLASS_REPRESENTATIVE";
+    }
+    if ("院系管理员".equals(role) || "系管理员".equals(role)) {
+      return "DEPARTMENT_ADMIN";
+    }
+    if (Arrays.asList("STUDENT", "CLASS_REPRESENTATIVE", "DEPARTMENT_ADMIN").contains(role)) {
+      return role;
+    }
+    return "STUDENT";
+  }
+
+  private String normalizeUserStatus(String value) {
+    String status = asString(value);
+    if ("禁用".equals(status) || "DISABLED".equals(status)) {
+      return "DISABLED";
+    }
+    return "ACTIVE";
   }
 
   private Long insert(String sql, Object... args) {
@@ -844,6 +1576,61 @@ public class FeedbackDatabaseService {
     ensureColumn("teaching_task", "day_index", "INT");
     ensureColumn("teaching_task", "section_index", "INT");
     ensureColumn("teaching_task", "classroom", "VARCHAR(200)");
+    ensureFeedbackSupportTables();
+    seedSensitiveTerms();
+  }
+
+  private void ensureFeedbackSupportTables() {
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS sensitive_term (" +
+            "id BIGINT PRIMARY KEY AUTO_INCREMENT, " +
+            "term_text VARCHAR(100) NOT NULL, " +
+            "category VARCHAR(80), " +
+            "risk_level VARCHAR(20), " +
+            "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, " +
+            "UNIQUE KEY uk_sensitive_term_text (term_text)" +
+            ")"
+    );
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS feedback_flag (" +
+            "id BIGINT PRIMARY KEY AUTO_INCREMENT, " +
+            "feedback_type VARCHAR(20) NOT NULL, " +
+            "feedback_id BIGINT NOT NULL, " +
+            "flag_type VARCHAR(80), " +
+            "flag_value VARCHAR(200), " +
+            "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, " +
+            "INDEX idx_feedback_flag_target (feedback_type, feedback_id)" +
+            ")"
+    );
+  }
+
+  private void seedSensitiveTerms() {
+    if (count("SELECT COUNT(*) FROM sensitive_term") > 0) {
+      return;
+    }
+    List<Object[]> terms = Arrays.asList(
+        new Object[] {"水课", "教学质量", "HIGH"},
+        new Object[] {"早退", "课堂纪律", "HIGH"},
+        new Object[] {"离场", "课堂纪律", "HIGH"},
+        new Object[] {"无故离场", "课堂纪律", "HIGH"},
+        new Object[] {"不适", "课堂内容", "HIGH"},
+        new Object[] {"辱骂", "课堂内容", "HIGH"},
+        new Object[] {"歧视", "课堂内容", "HIGH"},
+        new Object[] {"设备故障", "硬件问题", "MEDIUM"},
+        new Object[] {"投影", "硬件问题", "MEDIUM"},
+        new Object[] {"话筒", "硬件问题", "MEDIUM"},
+        new Object[] {"多媒体", "硬件问题", "MEDIUM"},
+        new Object[] {"声音太小", "硬件问题", "MEDIUM"},
+        new Object[] {"作业量过大", "教学质量", "MEDIUM"},
+        new Object[] {"语速过快", "教学质量", "MEDIUM"},
+        new Object[] {"讲不清", "教学质量", "MEDIUM"}
+    );
+    for (Object[] term : terms) {
+      db.update(
+          "INSERT IGNORE INTO sensitive_term (term_text, category, risk_level) VALUES (?, ?, ?)",
+          term
+      );
+    }
   }
 
   private void ensureColumn(String tableName, String columnName, String definition) {
@@ -1019,6 +1806,11 @@ public class FeedbackDatabaseService {
     return value == null ? "" : String.valueOf(value).trim();
   }
 
+  private String textOrDefault(Object value, String defaultValue) {
+    String text = asString(value);
+    return text.isBlank() ? defaultValue : text;
+  }
+
   private Long asLong(Object value, Long defaultValue) {
     if (value == null || String.valueOf(value).isBlank()) {
       return defaultValue;
@@ -1038,6 +1830,22 @@ public class FeedbackDatabaseService {
       return (Boolean) value;
     }
     return "true".equalsIgnoreCase(String.valueOf(value)) || "1".equals(String.valueOf(value));
+  }
+
+  private int rolePriority(String roleKey) {
+    if ("SUPER_ADMIN".equals(roleKey)) {
+      return 4;
+    }
+    if ("DEPARTMENT_ADMIN".equals(roleKey)) {
+      return 3;
+    }
+    if ("CLASS_REPRESENTATIVE".equals(roleKey)) {
+      return 2;
+    }
+    if ("STUDENT".equals(roleKey)) {
+      return 1;
+    }
+    return 0;
   }
 
   @SuppressWarnings("unchecked")

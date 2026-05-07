@@ -348,6 +348,23 @@ body {
   width: 100%;
 }
 
+.form-tip-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  margin-top: 8px;
+  color: #64748b;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.form-tip-row span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .remember-password {
   margin: -4px 0 16px;
 }
@@ -511,10 +528,15 @@ body {
 
 .grade-query {
   display: grid;
-  grid-template-columns: minmax(220px, 1fr) auto;
+  grid-template-columns: minmax(220px, 1fr) auto auto;
   gap: 10px;
   align-items: center;
   margin-bottom: 14px;
+}
+
+.academic-debug-report {
+  margin-bottom: 14px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
 .grade-summary {
@@ -554,6 +576,14 @@ body {
 
 .el-tag {
   border-radius: 2px;
+}
+
+.user-role-table .el-table__cell {
+  vertical-align: middle;
+}
+
+.user-role-table .cell {
+  white-space: nowrap;
 }
 
 .el-drawer__header {
