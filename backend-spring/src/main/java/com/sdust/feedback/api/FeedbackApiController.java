@@ -238,6 +238,9 @@ public class FeedbackApiController {
     if (user == null) {
       return unauthorized();
     }
+    if (!isAdmin(user)) {
+      return forbidden("只有管理员可以查看用户信息");
+    }
     return ResponseEntity.ok(ApiResponse.ok(databaseService.users(user)));
   }
 
@@ -277,8 +280,17 @@ public class FeedbackApiController {
   }
 
   @GetMapping("/master-data")
-  public ApiResponse<?> supportedMasterData() {
-    return ApiResponse.ok(databaseService.supportedResources());
+  public ResponseEntity<ApiResponse<?>> supportedMasterData(
+      @RequestHeader(value = "Authorization", required = false) String authorization
+  ) {
+    Map<String, Object> user = authenticatedUser(authorization);
+    if (user == null) {
+      return unauthorized();
+    }
+    if (!isAdmin(user)) {
+      return forbidden("只有管理员可以查看基础数据");
+    }
+    return ResponseEntity.ok(ApiResponse.ok(databaseService.supportedResources()));
   }
 
   @GetMapping("/master-data/{resource}")
@@ -290,6 +302,9 @@ public class FeedbackApiController {
     if (user == null) {
       return unauthorized();
     }
+    if (!isAdmin(user)) {
+      return forbidden("只有管理员可以查看基础数据");
+    }
     Object data = databaseService.listResource(resource, user);
     if (data == null) {
       return ResponseEntity.status(HttpStatus.NOT_FOUND).body(ApiResponse.fail("资源不存在"));
@@ -300,8 +315,16 @@ public class FeedbackApiController {
   @PostMapping("/master-data/{resource}")
   public ResponseEntity<ApiResponse<?>> createMasterData(
       @PathVariable String resource,
+      @RequestHeader(value = "Authorization", required = false) String authorization,
       @RequestBody Map<String, Object> body
   ) {
+    Map<String, Object> user = authenticatedUser(authorization);
+    if (user == null) {
+      return unauthorized();
+    }
+    if (!isAdmin(user)) {
+      return forbidden("只有管理员可以维护基础数据");
+    }
     Object data = databaseService.createResource(resource, body);
     if (data == null) {
       return ResponseEntity.status(HttpStatus.NOT_FOUND).body(ApiResponse.fail("资源不存在"));
