@@ -7,3 +7,4 @@ Thumbs.db
 coverage/
 *.log
 target/
+.claude/worktrees/practical-kirch-4d86cc/
