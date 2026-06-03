@@ -11,6 +11,8 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -27,6 +29,8 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @RequestMapping("/api/v1")
 public class FeedbackApiController {
+  private static final Logger LOGGER = LoggerFactory.getLogger(FeedbackApiController.class);
+
   private final FeedbackDatabaseService databaseService;
   private final QzAcademicClient academicClient;
   private final AiAnalysisService aiAnalysisService;
@@ -165,10 +169,11 @@ public class FeedbackApiController {
         data.put("rawCount", 0);
         data.put("timetable", java.util.Collections.emptyList());
         data.put("source", "academic");
-        data.put("warning", error.getMessage());
+        logAcademicError("学校账号登录后读取课表失败", error);
+        data.put("warning", publicAcademicMessage(error.getMessage()));
         return ResponseEntity.ok(ApiResponse.ok(data));
       }
-      return badRequest(error.getMessage());
+      return academicBadRequest("学校账号登录失败", error);
     } catch (Exception error) {
       return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(ApiResponse.fail("学校账号登录失败：" + error.getMessage()));
     }
@@ -382,9 +387,10 @@ public class FeedbackApiController {
     try {
       return ResponseEntity.ok(ApiResponse.ok(academicClient.queryGrades(body)));
     } catch (IllegalArgumentException error) {
-      return badRequest(error.getMessage());
+      return academicBadRequest("成绩查询失败", error);
     } catch (Exception error) {
-      return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(ApiResponse.fail("成绩查询失败：" + error.getMessage()));
+      logAcademicError("成绩查询异常", error);
+      return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(ApiResponse.fail("成绩查询失败：" + publicAcademicMessage(error.getMessage())));
     }
   }
 
@@ -430,9 +436,10 @@ public class FeedbackApiController {
       data.put("info", rows);
       return ResponseEntity.ok(ApiResponse.ok(data));
     } catch (IllegalArgumentException error) {
-      return badRequest(error.getMessage());
+      return academicBadRequest("教务课表查询失败", error);
     } catch (Exception error) {
-      return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(ApiResponse.fail("教务课表查询失败：" + error.getMessage()));
+      logAcademicError("教务课表查询异常", error);
+      return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(ApiResponse.fail("教务课表查询失败：" + publicAcademicMessage(error.getMessage())));
     }
   }
 
@@ -490,9 +497,10 @@ public class FeedbackApiController {
       result.put("normalizedCount", syncResult.getRows().size());
       return ResponseEntity.ok(ApiResponse.ok(result));
     } catch (IllegalArgumentException error) {
-      return badRequest(error.getMessage());
+      return academicBadRequest("教务系统同步失败", error);
     } catch (Exception error) {
-      return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(ApiResponse.fail("教务系统同步失败：" + error.getMessage()));
+      logAcademicError("教务系统同步异常", error);
+      return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(ApiResponse.fail("教务系统同步失败：" + publicAcademicMessage(error.getMessage())));
     }
   }
 
@@ -698,6 +706,31 @@ public class FeedbackApiController {
 
   private ResponseEntity<ApiResponse<?>> badRequest(String message) {
     return ResponseEntity.badRequest().body(ApiResponse.fail(message));
+  }
+
+  private ResponseEntity<ApiResponse<?>> academicBadRequest(String operation, Exception error) {
+    logAcademicError(operation, error);
+    return badRequest(publicAcademicMessage(error.getMessage()));
+  }
+
+  private void logAcademicError(String operation, Exception error) {
+    LOGGER.warn("{}：{}", operation, error.getMessage());
+  }
+
+  private String publicAcademicMessage(String message) {
+    if (message == null || message.isBlank()) {
+      return "教务系统响应异常，请稍后重试";
+    }
+    if (message.startsWith("教务登录成功，但没有解析到课表数据")) {
+      return "教务登录成功，但本周课表暂未读取到。请稍后刷新课表，或先使用管理员导入的本地课表。";
+    }
+    if (message.startsWith("验证码错误")) {
+      return "验证码错误，请刷新验证码后重新输入";
+    }
+    if (message.contains("返回片段") || message.contains("页面特征") || message.contains("最后尝试参数")) {
+      return "教务系统返回页面结构异常，请稍后重试；如需排查，请使用教务诊断功能。";
+    }
+    return message.length() > 120 ? message.substring(0, 120) + "..." : message;
   }
 
   private ResponseEntity<ApiResponse<?>> unauthorized() {
