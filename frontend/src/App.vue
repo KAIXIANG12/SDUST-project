@@ -210,7 +210,7 @@ const replyForm = reactive({
 });
 
 const menuItems = [
-  { key: "dashboard", label: "驾驶舱", icon: HomeFilled },
+  { key: "dashboard", label: "仪表盘", icon: HomeFilled },
   { key: "baseData", label: "基础数据", icon: OfficeBuilding },
   { key: "schedule", label: "课表任务", icon: Calendar },
   { key: "feedback", label: "反馈中心", icon: DocumentChecked },

@@ -7,3 +7,6 @@ Thumbs.db
 coverage/
 *.log
 target/
+.claude/worktrees/practical-kirch-4d86cc/
+outputs/
+高校教学质量信息反馈系统一辩汇报.pptx
