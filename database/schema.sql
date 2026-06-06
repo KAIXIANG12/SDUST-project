@@ -100,6 +100,7 @@ CREATE TABLE IF NOT EXISTS weekly_feedback_task (
   class_group_id BIGINT NOT NULL,
   task_name VARCHAR(200) NOT NULL,
   deadline DATETIME,
+  feedback_scope VARCHAR(30) NOT NULL DEFAULT 'ALL_COURSES',
   status VARCHAR(20) NOT NULL DEFAULT 'PENDING',
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -170,7 +171,34 @@ CREATE TABLE IF NOT EXISTS ai_summary (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,
   target_type VARCHAR(30) NOT NULL,
   target_id BIGINT NOT NULL,
+  target_key VARCHAR(255),
   summary_text TEXT NOT NULL,
   model_name VARCHAR(100),
+  risk_level VARCHAR(20),
+  suggestions_text TEXT,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS sync_log (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  operator_user_id BIGINT,
+  action_type VARCHAR(60) NOT NULL,
+  status VARCHAR(30) NOT NULL,
+  message VARCHAR(255),
+  success_count INT NOT NULL DEFAULT 0,
+  failure_count INT NOT NULL DEFAULT 0,
+  detail_text TEXT,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS reminder_rule (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  department_id BIGINT,
+  rule_name VARCHAR(120) NOT NULL,
+  due_day_of_week INT NOT NULL DEFAULT 5,
+  due_time VARCHAR(10) NOT NULL DEFAULT '18:00',
+  remind_before_hours INT NOT NULL DEFAULT 24,
+  min_word_count INT NOT NULL DEFAULT 20,
+  status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE',
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

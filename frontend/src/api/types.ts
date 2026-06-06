@@ -82,6 +82,7 @@ export type AcademicLoginResponse = LoginResponse & {
 
 export type AcademicTimetableRequest = {
   academicSessionId: string;
+  password?: string;
   termCode?: string;
   weekNo?: number | string;
   enrichTeachers?: boolean | string;
@@ -169,7 +170,10 @@ export type WeeklyTask = {
   weekNo: number;
   className: string;
   taskName: string;
+  feedbackScope?: "FOREIGN_ONLY" | "ALL_COURSES" | string;
+  feedbackScopeLabel?: string;
   deadline?: string | null;
+  reminderStatus?: string;
   status: string;
 };
 
@@ -206,8 +210,11 @@ export type WeeklyTaskItem = Record<string, unknown> & {
   weekRange?: string;
   guidanceMode?: string;
   classroom?: string;
+  feedbackScope?: "FOREIGN_ONLY" | "ALL_COURSES" | string;
+  feedbackScopeLabel?: string;
   feedbackId?: number | null;
   itemStatus: string;
+  reminderStatus?: string;
   qualityStatus: string;
   qualityRemark?: string;
   feedbackWordCount?: number;
@@ -235,6 +242,7 @@ export type WeeklyFeedbackSummary = Record<string, unknown> & {
   aiSensitivePoints?: string[];
   aiSuggestions?: string[];
   aiProvider?: string;
+  aiGeneratedAt?: string;
   aiError?: string;
 };
 
@@ -258,6 +266,11 @@ export type WeeklyFeedback = Record<string, unknown> & {
   remark?: string;
   latestReplyContent?: string | null;
   latestReplyAt?: string | null;
+  aiRiskLevel?: string | null;
+  aiQualityLevel?: string | null;
+  aiCategory?: string | null;
+  aiSuggestion?: string | null;
+  aiError?: string | null;
 };
 
 export type RealtimeFeedback = {
@@ -273,6 +286,11 @@ export type RealtimeFeedback = {
   createdAt?: string;
   latestReplyContent?: string | null;
   latestReplyAt?: string | null;
+  aiRiskLevel?: string | null;
+  aiQualityLevel?: string | null;
+  aiCategory?: string | null;
+  aiSuggestion?: string | null;
+  aiError?: string | null;
 };
 
 export type FeedbackFlag = {
@@ -322,6 +340,7 @@ export type GenerateWeeklyTasksRequest = {
   weekNo: number;
   deadline?: string | null;
   classGroupIds?: number[];
+  feedbackScope?: "AUTO" | "FOREIGN_ONLY" | "ALL_COURSES";
 };
 
 export type ReplyFeedbackRequest = {
@@ -339,4 +358,42 @@ export type FeedbackReply = {
   replierName?: string;
   replyContent: string;
   createdAt: string;
+};
+
+export type SyncLog = {
+  id: number;
+  operatorName?: string;
+  actionType: string;
+  status: string;
+  message?: string;
+  successCount: number;
+  failureCount: number;
+  detailText?: string;
+  createdAt: string;
+};
+
+export type ReminderRule = {
+  id?: number;
+  departmentId?: number | null;
+  departmentName?: string;
+  ruleName: string;
+  dueDayOfWeek: number;
+  dueTime: string;
+  remindBeforeHours: number;
+  minWordCount: number;
+  status: string;
+};
+
+export type MonitorDossier = Record<string, unknown> & {
+  monitorName?: string;
+  departmentName?: string;
+  className?: string;
+  taskCount: number;
+  requiredCourseCount: number;
+  submittedCourseCount: number;
+  missingCourseCount: number;
+  overdueCount: number;
+  lowQualityCount: number;
+  completionRate: string;
+  dossierRemark: string;
 };

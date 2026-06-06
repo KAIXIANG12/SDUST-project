@@ -165,12 +165,12 @@ public class FeedbackApiController {
         data.put("rawCount", 0);
         data.put("timetable", java.util.Collections.emptyList());
         data.put("source", "academic");
-        data.put("warning", error.getMessage());
+        data.put("warning", publicAcademicWarning(error.getMessage()));
         return ResponseEntity.ok(ApiResponse.ok(data));
       }
-      return badRequest(error.getMessage());
+      return badRequest(publicAcademicWarning(error.getMessage()));
     } catch (Exception error) {
-      return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(ApiResponse.fail("学校账号登录失败：" + error.getMessage()));
+      return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(ApiResponse.fail("学校账号登录失败，请稍后重试或联系管理员"));
     }
   }
 
@@ -236,6 +236,25 @@ public class FeedbackApiController {
     return ResponseEntity.ok(ApiResponse.ok(databaseService.users(user)));
   }
 
+  @PostMapping("/users")
+  public ResponseEntity<ApiResponse<?>> createUser(
+      @RequestHeader(value = "Authorization", required = false) String authorization,
+      @RequestBody Map<String, Object> body
+  ) {
+    Map<String, Object> user = authenticatedUser(authorization);
+    if (user == null) {
+      return unauthorized();
+    }
+    if (!isAdmin(user)) {
+      return forbidden("只有管理员可以新增用户");
+    }
+    try {
+      return ResponseEntity.ok(ApiResponse.ok(databaseService.createManualUser(body, user)));
+    } catch (IllegalArgumentException error) {
+      return badRequest(error.getMessage());
+    }
+  }
+
   @PatchMapping("/users/{id}/authorization")
   public ResponseEntity<ApiResponse<?>> updateUserAuthorization(
       @PathVariable Long id,
@@ -251,6 +270,25 @@ public class FeedbackApiController {
     }
     try {
       return ResponseEntity.ok(ApiResponse.ok(databaseService.updateUserAuthorization(id, body, user)));
+    } catch (IllegalArgumentException error) {
+      return badRequest(error.getMessage());
+    }
+  }
+
+  @DeleteMapping("/users/{id}")
+  public ResponseEntity<ApiResponse<?>> deleteUser(
+      @PathVariable Long id,
+      @RequestHeader(value = "Authorization", required = false) String authorization
+  ) {
+    Map<String, Object> user = authenticatedUser(authorization);
+    if (user == null) {
+      return unauthorized();
+    }
+    if (!isAdmin(user)) {
+      return forbidden("只有管理员可以删除用户");
+    }
+    try {
+      return ResponseEntity.ok(ApiResponse.ok(databaseService.deleteUser(id, user)));
     } catch (IllegalArgumentException error) {
       return badRequest(error.getMessage());
     }
@@ -295,13 +333,119 @@ public class FeedbackApiController {
   @PostMapping("/master-data/{resource}")
   public ResponseEntity<ApiResponse<?>> createMasterData(
       @PathVariable String resource,
-      @RequestBody Map<String, Object> body
+      @RequestBody Map<String, Object> body,
+      @RequestHeader(value = "Authorization", required = false) String authorization
   ) {
+    Map<String, Object> user = authenticatedUser(authorization);
+    if (user == null) {
+      return unauthorized();
+    }
+    if (!isAdmin(user)) {
+      return forbidden("无权维护基础数据");
+    }
     Object data = databaseService.createResource(resource, body);
     if (data == null) {
       return ResponseEntity.status(HttpStatus.NOT_FOUND).body(ApiResponse.fail("资源不存在"));
     }
     return ResponseEntity.ok(ApiResponse.ok(data));
+  }
+
+  @PatchMapping("/master-data/{resource}/{id}")
+  public ResponseEntity<ApiResponse<?>> updateMasterData(
+      @PathVariable String resource,
+      @PathVariable Long id,
+      @RequestBody Map<String, Object> body,
+      @RequestHeader(value = "Authorization", required = false) String authorization
+  ) {
+    Map<String, Object> user = authenticatedUser(authorization);
+    if (user == null) {
+      return unauthorized();
+    }
+    if (!isAdmin(user)) {
+      return forbidden("无权维护基础数据");
+    }
+    try {
+      Object data = databaseService.updateResource(resource, id, body, user);
+      if (data == null) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(ApiResponse.fail("资源不存在"));
+      }
+      return ResponseEntity.ok(ApiResponse.ok(data));
+    } catch (IllegalArgumentException error) {
+      return forbidden(error.getMessage());
+    }
+  }
+
+  @DeleteMapping("/master-data/{resource}/{id}")
+  public ResponseEntity<ApiResponse<?>> deleteMasterData(
+      @PathVariable String resource,
+      @PathVariable Long id,
+      @RequestHeader(value = "Authorization", required = false) String authorization
+  ) {
+    Map<String, Object> user = authenticatedUser(authorization);
+    if (user == null) {
+      return unauthorized();
+    }
+    if (!isAdmin(user)) {
+      return forbidden("无权维护基础数据");
+    }
+    try {
+      Object data = databaseService.deleteResource(resource, id, user);
+      if (data == null) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(ApiResponse.fail("资源不存在"));
+      }
+      return ResponseEntity.ok(ApiResponse.ok(data));
+    } catch (Exception error) {
+      return badRequest("该基础数据可能已被业务数据引用，暂不能删除");
+    }
+  }
+
+  @GetMapping("/operations/sync-logs")
+  public ResponseEntity<ApiResponse<?>> syncLogs(
+      @RequestHeader(value = "Authorization", required = false) String authorization
+  ) {
+    Map<String, Object> user = authenticatedUser(authorization);
+    if (user == null) {
+      return unauthorized();
+    }
+    return ResponseEntity.ok(ApiResponse.ok(databaseService.syncLogs(user)));
+  }
+
+  @GetMapping("/operations/reminder-rules")
+  public ResponseEntity<ApiResponse<?>> reminderRules(
+      @RequestHeader(value = "Authorization", required = false) String authorization
+  ) {
+    Map<String, Object> user = authenticatedUser(authorization);
+    if (user == null) {
+      return unauthorized();
+    }
+    return ResponseEntity.ok(ApiResponse.ok(databaseService.reminderRules(user)));
+  }
+
+  @PostMapping("/operations/reminder-rules")
+  public ResponseEntity<ApiResponse<?>> saveReminderRule(
+      @RequestHeader(value = "Authorization", required = false) String authorization,
+      @RequestBody Map<String, Object> body
+  ) {
+    Map<String, Object> user = authenticatedUser(authorization);
+    if (user == null) {
+      return unauthorized();
+    }
+    try {
+      return ResponseEntity.ok(ApiResponse.ok(databaseService.saveReminderRule(body, user)));
+    } catch (IllegalArgumentException error) {
+      return forbidden(error.getMessage());
+    }
+  }
+
+  @GetMapping("/schedules/class-representative-dossiers")
+  public ResponseEntity<ApiResponse<?>> monitorDossiers(
+      @RequestHeader(value = "Authorization", required = false) String authorization
+  ) {
+    Map<String, Object> user = authenticatedUser(authorization);
+    if (user == null) {
+      return unauthorized();
+    }
+    return ResponseEntity.ok(ApiResponse.ok(databaseService.monitorDossiers(user)));
   }
 
   @GetMapping("/schedules/weekly-tasks")
@@ -338,13 +482,29 @@ public class FeedbackApiController {
   }
 
   @PostMapping("/schedules/weekly-tasks/generate")
-  public ApiResponse<?> generateWeeklyTasks(@RequestBody Map<String, Object> body) {
-    return ApiResponse.ok(databaseService.generateWeeklyTasks(body));
+  public ResponseEntity<ApiResponse<?>> generateWeeklyTasks(
+      @RequestHeader(value = "Authorization", required = false) String authorization,
+      @RequestBody Map<String, Object> body
+  ) {
+    Map<String, Object> user = authenticatedUser(authorization);
+    if (user == null) {
+      return unauthorized();
+    }
+    body.put("operatorId", number(user.get("id")));
+    return ResponseEntity.ok(ApiResponse.ok(databaseService.generateWeeklyTasks(body)));
   }
 
   @PostMapping("/schedules/teaching-tasks/import")
-  public ApiResponse<?> importTeachingTasks(@RequestBody Map<String, Object> body) {
-    return ApiResponse.ok(databaseService.importTeachingTasks(body));
+  public ResponseEntity<ApiResponse<?>> importTeachingTasks(
+      @RequestHeader(value = "Authorization", required = false) String authorization,
+      @RequestBody Map<String, Object> body
+  ) {
+    Map<String, Object> user = authenticatedUser(authorization);
+    if (user == null) {
+      return unauthorized();
+    }
+    body.put("operatorId", number(user.get("id")));
+    return ResponseEntity.ok(ApiResponse.ok(databaseService.importTeachingTasks(body)));
   }
 
   @GetMapping("/schedules/teaching-tasks/captcha")
@@ -426,13 +586,24 @@ public class FeedbackApiController {
           timetable.getRows(),
           number(timetable.getWeekNo()).intValue()
       );
+      databaseService.logSyncEvent(
+          number(user.get("id")),
+          "ACADEMIC_TIMETABLE_QUERY",
+          rows.isEmpty() ? "EMPTY" : "SUCCESS",
+          "查询个人教务课表",
+          rows.size(),
+          rows.isEmpty() ? 1 : 0,
+          "term=" + timetable.getTermCode() + ", week=" + timetable.getWeekNo()
+      );
       data.put("timetable", rows);
       data.put("info", rows);
       return ResponseEntity.ok(ApiResponse.ok(data));
     } catch (IllegalArgumentException error) {
-      return badRequest(error.getMessage());
+      databaseService.logSyncEvent(number(user.get("id")), "ACADEMIC_TIMETABLE_QUERY", "FAILED", "查询个人教务课表失败", 0, 1, publicAcademicWarning(error.getMessage()));
+      return badRequest(publicAcademicWarning(error.getMessage()));
     } catch (Exception error) {
-      return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(ApiResponse.fail("教务课表查询失败：" + error.getMessage()));
+      databaseService.logSyncEvent(number(user.get("id")), "ACADEMIC_TIMETABLE_QUERY", "FAILED", "查询个人教务课表异常", 0, 1, "教务课表查询失败");
+      return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(ApiResponse.fail("教务课表查询失败，请稍后重试或联系管理员"));
     }
   }
 
@@ -482,6 +653,7 @@ public class FeedbackApiController {
       Map<String, Object> importPayload = new HashMap<>();
       importPayload.put("termId", body.getOrDefault("termId", 1));
       importPayload.put("rows", syncResult.getRows());
+      importPayload.put("operatorId", number(user.get("id")));
       Map<String, Object> importResult = databaseService.importTeachingTasks(importPayload);
       Map<String, Object> result = new HashMap<>(importResult);
       result.put("termCode", syncResult.getTermCode());
@@ -520,7 +692,9 @@ public class FeedbackApiController {
     if (!databaseService.canSubmitWeeklyFeedbackForCourse(body, user)) {
       return forbidden("只能提交自己当前周课表中存在的课程反馈");
     }
-    return ResponseEntity.ok(ApiResponse.ok(databaseService.createWeeklyFeedback(body)));
+    Map<String, Object> created = databaseService.createWeeklyFeedback(body);
+    runAiFeedbackAnalysis("WEEKLY", created);
+    return ResponseEntity.ok(ApiResponse.ok(created));
   }
 
   @GetMapping("/feedbacks/realtime")
@@ -545,7 +719,9 @@ public class FeedbackApiController {
     }
     body.put("studentId", user.get("id"));
     body.put("departmentId", databaseService.resolveUserDepartmentId(user));
-    return ResponseEntity.ok(ApiResponse.ok(databaseService.createRealtimeFeedback(body)));
+    Map<String, Object> created = databaseService.createRealtimeFeedback(body);
+    runAiFeedbackAnalysis("REALTIME", created);
+    return ResponseEntity.ok(ApiResponse.ok(created));
   }
 
   @PatchMapping("/feedbacks/realtime/{id}")
@@ -559,7 +735,9 @@ public class FeedbackApiController {
       return unauthorized();
     }
     try {
-      return ResponseEntity.ok(ApiResponse.ok(databaseService.updateRealtimeFeedback(id, body, user)));
+      Map<String, Object> updated = databaseService.updateRealtimeFeedback(id, body, user);
+      runAiFeedbackAnalysis("REALTIME", updated);
+      return ResponseEntity.ok(ApiResponse.ok(updated));
     } catch (IllegalArgumentException error) {
       return forbidden(error.getMessage());
     }
@@ -597,6 +775,48 @@ public class FeedbackApiController {
       return forbidden("无权处理该反馈");
     }
     return ResponseEntity.ok(ApiResponse.ok(databaseService.replyFeedback(body, user)));
+  }
+
+  @PostMapping("/feedbacks/ai-analysis")
+  public ResponseEntity<ApiResponse<?>> analyzeFeedback(
+      @RequestHeader(value = "Authorization", required = false) String authorization,
+      @RequestBody Map<String, Object> body
+  ) {
+    Map<String, Object> user = authenticatedUser(authorization);
+    if (user == null) {
+      return unauthorized();
+    }
+    if (!isAdmin(user)) {
+      return forbidden("只有管理员可以触发 AI 分析");
+    }
+    if (!databaseService.canAccessFeedback(body, user)) {
+      return forbidden("无权分析该反馈");
+    }
+    String feedbackType = text(body.get("feedbackType"));
+    Long feedbackId = number(body.get("feedbackId"));
+    Map<String, Object> feedback = databaseService.feedbackForAiAnalysis(feedbackType, feedbackId);
+    if (feedback == null) {
+      return badRequest("反馈不存在");
+    }
+    feedback.put("id", feedbackId);
+    try {
+      Map<String, Object> analysis = analyzeAndSaveFeedback(feedbackType, feedback);
+      return ResponseEntity.ok(ApiResponse.ok(analysis));
+    } catch (Exception error) {
+      databaseService.saveAiFeedbackError(feedbackType, feedbackId, safeAiWarning(error.getMessage()));
+      return badRequest("AI 分析暂未完成，请检查 AI 配置或网络后重试");
+    }
+  }
+
+  @GetMapping("/feedbacks/ai-enabled")
+  public ResponseEntity<ApiResponse<?>> aiEnabled(
+      @RequestHeader(value = "Authorization", required = false) String authorization
+  ) {
+    Map<String, Object> user = authenticatedUser(authorization);
+    if (user == null) {
+      return unauthorized();
+    }
+    return ResponseEntity.ok(ApiResponse.ok(Map.of("enabled", aiAnalysisService.enabled())));
   }
 
   @GetMapping("/feedbacks/replies")
@@ -688,7 +908,7 @@ public class FeedbackApiController {
     }
     try {
       List<Map<String, Object>> summaries = databaseService.weeklyFeedbackSummaries(user);
-      return ResponseEntity.ok(ApiResponse.ok(aiAnalysisService.enhanceWeeklySummaries(summaries)));
+      return ResponseEntity.ok(ApiResponse.ok(databaseService.saveWeeklyAiSummaries(aiAnalysisService.enhanceWeeklySummaries(summaries))));
     } catch (IllegalArgumentException error) {
       return badRequest(error.getMessage());
     } catch (Exception error) {
@@ -706,6 +926,23 @@ public class FeedbackApiController {
 
   private ResponseEntity<ApiResponse<?>> forbidden(String message) {
     return ResponseEntity.status(HttpStatus.FORBIDDEN).body(ApiResponse.fail(message));
+  }
+
+  private String publicAcademicWarning(String message) {
+    String text = text(message);
+    if (text.contains("验证码错误")) {
+      return "验证码错误，请重试";
+    }
+    if (text.contains("没有解析到课表数据") || text.contains("返回片段") || text.contains("页面特征") || text.contains("最后尝试参数")) {
+      return "课表暂时未读取到，不影响继续使用系统，可稍后刷新课表。";
+    }
+    if (text.contains("返回不是 JSON") || text.contains("统一认证页面") || text.contains("网关")) {
+      return "教务接口暂时不可用或被网关拦截，请稍后重试。";
+    }
+    if (text.length() > 120) {
+      return "教务系统返回异常，请稍后重试或联系管理员。";
+    }
+    return text;
   }
 
   private Map<String, Object> authenticatedUser(String authorization) {
@@ -754,10 +991,6 @@ public class FeedbackApiController {
       }
     } catch (Exception error) {
       webWarning = error.getMessage();
-      if (Boolean.TRUE.equals(body.get("profileFastOnly"))) {
-        result.put("warning", "HTML 个人信息页失败：" + webWarning);
-        return result;
-      }
       try {
         result.put("source", "app.do getUserInfo");
         Map<String, Object> profile = academicClient.readStudentProfileFromAppApi(body);
@@ -781,6 +1014,40 @@ public class FeedbackApiController {
       }
     }
     return result;
+  }
+
+  private void runAiFeedbackAnalysis(String feedbackType, Map<String, Object> feedback) {
+    try {
+      analyzeAndSaveFeedback(feedbackType, feedback);
+    } catch (Exception error) {
+      Long feedbackId = feedback.get("id") == null ? null : number(feedback.get("id"));
+      databaseService.saveAiFeedbackError(feedbackType, feedbackId, safeAiWarning(error.getMessage()));
+    }
+  }
+
+  private Map<String, Object> analyzeAndSaveFeedback(String feedbackType, Map<String, Object> feedback) {
+    Long feedbackId = number(feedback.get("id"));
+    Map<String, Object> analysis = aiAnalysisService.analyzeFeedback(feedbackType, feedback);
+    databaseService.saveAiFeedbackAnalysis(feedbackType, feedbackId, analysis);
+    feedback.put("aiRiskLevel", analysis.get("riskLevel"));
+    feedback.put("aiQualityLevel", analysis.get("qualityLevel"));
+    feedback.put("aiCategory", analysis.get("category"));
+    feedback.put("aiSuggestion", analysis.get("suggestion"));
+    return analysis;
+  }
+
+  private String safeAiWarning(String message) {
+    String text = text(message);
+    if (text.isBlank()) {
+      return "AI 分析暂未完成，请稍后重试";
+    }
+    if (text.contains("未配置") || text.contains("Key") || text.contains("401") || text.contains("403")) {
+      return "AI 配置暂不可用，请检查密钥配置";
+    }
+    if (text.contains("timeout") || text.contains("timed out") || text.contains("connect") || text.contains("网络")) {
+      return "AI 服务连接超时，请稍后重试";
+    }
+    return text.length() > 120 ? "AI 服务返回异常，请稍后重试" : text;
   }
 
   @SuppressWarnings("unchecked")

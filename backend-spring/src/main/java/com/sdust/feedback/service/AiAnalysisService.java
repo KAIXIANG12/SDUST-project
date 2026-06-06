@@ -65,6 +65,17 @@ public class AiAnalysisService {
     return result;
   }
 
+  public Map<String, Object> analyzeFeedback(String feedbackType, Map<String, Object> feedback) {
+    if (!enabled()) {
+      throw new IllegalArgumentException("未配置 AI Key，无法进行反馈智能判断");
+    }
+    try {
+      return analyzeFeedbackOne(feedbackType, feedback);
+    } catch (Exception error) {
+      throw new IllegalArgumentException(error.getMessage());
+    }
+  }
+
   private Map<String, Object> analyzeOne(Map<String, Object> summary) throws Exception {
     Map<String, Object> body = new LinkedHashMap<>();
     body.put("model", model);
@@ -102,6 +113,36 @@ public class AiAnalysisService {
     return objectMapper.readValue(content, new TypeReference<>() {});
   }
 
+  private Map<String, Object> analyzeFeedbackOne(String feedbackType, Map<String, Object> feedback) throws Exception {
+    Map<String, Object> body = new LinkedHashMap<>();
+    body.put("model", model);
+    body.put("temperature", 0.1);
+    body.put("stream", false);
+    body.put("messages", List.of(
+        Map.of("role", "system", "content", "你是高校教学质量反馈审核助手。只输出 JSON，不要输出 Markdown。"),
+        Map.of("role", "user", "content", buildFeedbackPrompt(feedbackType, feedback))
+    ));
+
+    HttpRequest request = HttpRequest.newBuilder()
+        .uri(URI.create(baseUrl + "/chat/completions"))
+        .timeout(Duration.ofSeconds(30))
+        .header("Content-Type", "application/json")
+        .header("Authorization", "Bearer " + apiKey)
+        .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(body)))
+        .build();
+    HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+    if (response.statusCode() < 200 || response.statusCode() >= 300) {
+      throw new IllegalArgumentException("DeepSeek 调用失败：" + response.statusCode());
+    }
+    Map<String, Object> payload = objectMapper.readValue(response.body(), new TypeReference<>() {});
+    List<Map<String, Object>> choices = (List<Map<String, Object>>) payload.getOrDefault("choices", List.of());
+    if (choices.isEmpty()) {
+      throw new IllegalArgumentException("DeepSeek 未返回结果");
+    }
+    Map<String, Object> message = (Map<String, Object>) choices.get(0).getOrDefault("message", Map.of());
+    return objectMapper.readValue(stripJsonFence(text(message.get("content"))), new TypeReference<>() {});
+  }
+
   private String buildPrompt(Map<String, Object> summary) {
     return "请根据以下课程反馈生成教学质量总评，返回 JSON："
         + "{\"summary\":\"100字以内总评\",\"riskLevel\":\"LOW|MEDIUM|HIGH\","
@@ -114,6 +155,25 @@ public class AiAnalysisService {
         + "；问题反馈：" + text(summary.get("issueSummary"))
         + "；硬件问题：" + text(summary.get("hardwareSummary"))
         + "；规则风险：" + text(summary.get("riskLevel"));
+  }
+
+  private String buildFeedbackPrompt(String feedbackType, Map<String, Object> feedback) {
+    return "请对单条高校教学反馈做敏感信息、质量和处理建议判断。只返回 JSON："
+        + "{\"riskLevel\":\"LOW|MEDIUM|HIGH\","
+        + "\"qualityLevel\":\"LOW|NORMAL|HIGH\","
+        + "\"category\":\"教学内容|教学进度|外教语速|作业考核|硬件设备|课堂纪律|师德师风|学生事务|其他\","
+        + "\"sensitive\":true,"
+        + "\"reason\":\"50字以内判断依据\","
+        + "\"suggestion\":\"80字以内管理员处理建议\"}。"
+        + "反馈类型：" + feedbackType
+        + "；课程：" + text(feedback.get("courseName"))
+        + "；教师：" + text(feedback.get("actualTeacherName")) + text(feedback.get("teacherName"))
+        + "；标题：" + text(feedback.get("title"))
+        + "；教学效果或收获：" + text(feedback.get("learningOutcome"))
+        + "；问题建议：" + text(feedback.get("issueSuggestion"))
+        + "；硬件问题：" + text(feedback.get("hardwareIssue"))
+        + "；备注：" + text(feedback.get("remark"))
+        + "；实时反馈内容：" + text(feedback.get("content"));
   }
 
   private String stripJsonFence(String value) {

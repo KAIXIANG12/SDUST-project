@@ -27,7 +27,7 @@ INSERT IGNORE INTO app_user
   (id, username, password_hash, real_name, user_type, department_id, class_group_id, phone, status)
 VALUES
   (1, 'root', 'plain:admin123', '系统管理员', 'ADMIN', NULL, NULL, NULL, 'ACTIVE'),
-  (2, 'cs_admin', 'plain:admin123', '计算机学院管理员', 'ADMIN', 1, NULL, NULL, 'ACTIVE'),
+  (2, 'cs_admin', 'plain:admin123', '斯威本学院管理员', 'ADMIN', 5, NULL, NULL, 'ACTIVE'),
   (3, 'monitor_se_2401', 'plain:admin123', '软件工程一班学委', 'STUDENT', 1, 1, NULL, 'ACTIVE'),
   (4, 'student_demo', 'plain:admin123', '普通学生示例', 'STUDENT', 1, 1, NULL, 'ACTIVE');
 

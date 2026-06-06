@@ -33,6 +33,7 @@ const authChecking = ref(true);
 const isAuthenticated = ref(false);
 const submitDrawerVisible = ref(false);
 const masterDataDrawerVisible = ref(false);
+const reminderRuleDrawerVisible = ref(false);
 const userAuthorizationDrawerVisible = ref(false);
 const taskGenerateDrawerVisible = ref(false);
 const weeklyFeedbackDrawerVisible = ref(false);
@@ -88,6 +89,9 @@ const state = reactive({
   weeklyTasks: [],
   weeklyTaskItems: [],
   weeklyTaskCompliance: [],
+  monitorDossiers: [],
+  syncLogs: [],
+  reminderRules: [],
   weeklyFeedbacks: [],
   weeklyAnalytics: {
     byClass: [],
@@ -143,6 +147,17 @@ const timetableView = reactive({
 });
 
 const masterDataForm = reactive({});
+const masterDataEditingId = ref(null);
+const reminderRuleForm = reactive({
+  id: null,
+  departmentId: null,
+  ruleName: "周反馈提醒规则",
+  dueDayOfWeek: 5,
+  dueTime: "18:00",
+  remindBeforeHours: 24,
+  minWordCount: 20,
+  status: "ACTIVE"
+});
 
 const userAuthorizationForm = reactive({
   userId: null,
@@ -158,8 +173,15 @@ const taskGenerateForm = reactive({
   termId: 1,
   weekNo: 13,
   deadline: "",
-  classGroupIds: []
+  classGroupIds: [],
+  feedbackScope: "AUTO"
 });
+
+const urgencyOptions = [
+  { label: "普通", value: "LOW" },
+  { label: "一般", value: "MEDIUM" },
+  { label: "紧急", value: "HIGH" }
+];
 
 const weeklyFeedbackForm = reactive({
   taskId: null,
@@ -635,8 +657,10 @@ async function loadAllData() {
 
     if (isMonitorRole || isAdminRole) {
       state.weeklyTaskCompliance = await apiClient.getWeeklyTaskCompliance();
+      state.monitorDossiers = await apiClient.getMonitorDossiers();
     } else {
       state.weeklyTaskCompliance = [];
+      state.monitorDossiers = [];
     }
 
     if (isAdminRole) {
@@ -648,6 +672,8 @@ async function loadAllData() {
         teachers,
         courses,
         terms,
+        syncLogs,
+        reminderRules,
         weeklyAnalytics,
         weeklySummaries,
         feedbackFlags
@@ -659,6 +685,8 @@ async function loadAllData() {
         apiClient.getMasterData("teachers"),
         apiClient.getMasterData("courses"),
         apiClient.getMasterData("terms"),
+        apiClient.getSyncLogs().catch(() => []),
+        apiClient.getReminderRules().catch(() => []),
         apiClient.getWeeklyFeedbackAnalytics().catch(() => ({ byClass: [], byCourse: [], byTeacher: [] })),
         apiClient.getWeeklyFeedbackSummaries().catch(() => []),
         apiClient.getFeedbackFlags()
@@ -670,6 +698,8 @@ async function loadAllData() {
       state.masterData.teachers = teachers;
       state.masterData.courses = courses;
       state.masterData.terms = terms;
+      state.syncLogs = syncLogs;
+      state.reminderRules = reminderRules;
       state.weeklyAnalytics = weeklyAnalytics;
       state.weeklySummaries = weeklySummaries;
       state.feedbackFlags = feedbackFlags;
@@ -711,14 +741,29 @@ async function loadAcademicTimetable(week) {
   try {
     const result = await apiClient.queryAcademicTimetable({
       academicSessionId: academicSessionId.value,
+      password: academicLoginForm.password || localStorage.getItem(academicPasswordStorageKey) || "",
       termCode: state.personalTimetableMeta.termCode || "",
       weekNo: targetWeek,
       enrichTeachers: "false"
     });
     applyTimetableResult(result, { keepExistingWhenEmpty: true });
   } catch (error) {
-    ElMessage.warning(error instanceof Error ? error.message : "教务课表加载失败");
+    ElMessage.info(publicAcademicMessage(error, "课表暂时未读取到，已进入系统，可稍后刷新课表"));
   }
+}
+
+function publicAcademicMessage(error, fallback) {
+  const message = error instanceof Error ? error.message : "";
+  if (
+    message.includes("http") ||
+    message.includes("<html") ||
+    message.includes("返回片段") ||
+    message.includes("页面特征") ||
+    message.length > 120
+  ) {
+    return "课表暂时未读取到，不影响继续使用系统，可稍后刷新课表。";
+  }
+  return message || fallback;
 }
 
 function applyTimetableResult(result, options = {}) {
@@ -1124,15 +1169,12 @@ async function academicLogin() {
     if (!academicLoginForm.rememberPassword) {
       academicLoginForm.password = "";
     }
-    if (result.warning) {
-      ElMessage.warning(result.warning);
-    } else {
-      ElMessage.success("学校账号登录成功，正在读取课表");
-    }
+    ElMessage.success("登录成功");
     await loadAllData();
     loadAcademicTimetable(result.weekNo);
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "学校账号登录失败");
+    const message = error instanceof Error ? error.message : "学校账号登录失败";
+    ElMessage.error(message.includes("验证码错误") ? "验证码错误，请重试" : message);
     refreshLoginCaptcha();
   } finally {
     loading.value = false;
@@ -1214,9 +1256,30 @@ function canEditOwnRealtime(row) {
 
 function openMasterDataDrawer(resource) {
   activeMasterResource.value = resource;
+  masterDataEditingId.value = null;
   Object.keys(masterDataForm).forEach((key) => delete masterDataForm[key]);
   activeMasterTab.value?.fields.forEach((field) => {
     masterDataForm[field.prop] = field.type === "number" ? null : "";
+  });
+  masterDataDrawerVisible.value = true;
+}
+
+function openUserCreate() {
+  userAuthorizationForm.userId = null;
+  userAuthorizationForm.username = "";
+  userAuthorizationForm.realName = "";
+  userAuthorizationForm.role = "STUDENT";
+  userAuthorizationForm.departmentId = state.currentUser?.departmentId || null;
+  userAuthorizationForm.classGroupId = null;
+  userAuthorizationForm.status = "ACTIVE";
+  userAuthorizationDrawerVisible.value = true;
+}
+
+function openMasterDataEdit(row) {
+  masterDataEditingId.value = Number(row.id);
+  Object.keys(masterDataForm).forEach((key) => delete masterDataForm[key]);
+  activeMasterTab.value?.fields.forEach((field) => {
+    masterDataForm[field.prop] = row[field.prop] ?? (field.type === "number" ? null : "");
   });
   masterDataDrawerVisible.value = true;
 }
@@ -1232,12 +1295,60 @@ async function submitMasterData() {
   });
 
   try {
-    await apiClient.createMasterData(resource, payload);
-    ElMessage.success("基础数据已新增");
+    if (masterDataEditingId.value) {
+      await apiClient.updateMasterData(resource, Number(masterDataEditingId.value), payload);
+      ElMessage.success("基础数据已更新");
+    } else {
+      await apiClient.createMasterData(resource, payload);
+      ElMessage.success("基础数据已新增");
+    }
     masterDataDrawerVisible.value = false;
+    masterDataEditingId.value = null;
     state.masterData[resource] = await apiClient.getMasterData(resource);
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "新增失败");
+    ElMessage.error(error instanceof Error ? error.message : "保存失败");
+  }
+}
+
+async function deleteMasterData(row) {
+  const resource = activeMasterResource.value;
+  try {
+    await ElMessageBox.confirm("删除后不可恢复；如果该数据已被课程、用户或反馈引用，系统会阻止删除。确认删除吗？", "删除基础数据", {
+      type: "warning",
+      confirmButtonText: "删除",
+      cancelButtonText: "取消"
+    });
+    await apiClient.deleteMasterData(resource, Number(row.id));
+    state.masterData[resource] = await apiClient.getMasterData(resource);
+    ElMessage.success("基础数据已删除");
+  } catch (error) {
+    if (error !== "cancel") {
+      ElMessage.error(error instanceof Error ? error.message : "删除失败");
+    }
+  }
+}
+
+function openReminderRuleDrawer(row = null) {
+  const source = row || state.reminderRules[0] || {};
+  reminderRuleForm.id = source.id || null;
+  reminderRuleForm.departmentId = source.departmentId || state.currentUser?.departmentId || null;
+  reminderRuleForm.ruleName = source.ruleName || "周反馈提醒规则";
+  reminderRuleForm.dueDayOfWeek = Number(source.dueDayOfWeek || 5);
+  reminderRuleForm.dueTime = source.dueTime || "18:00";
+  reminderRuleForm.remindBeforeHours = Number(source.remindBeforeHours || 24);
+  reminderRuleForm.minWordCount = Number(source.minWordCount || 20);
+  reminderRuleForm.status = source.status || "ACTIVE";
+  reminderRuleDrawerVisible.value = true;
+}
+
+async function submitReminderRule() {
+  try {
+    await apiClient.saveReminderRule({ ...reminderRuleForm });
+    state.reminderRules = await apiClient.getReminderRules();
+    reminderRuleDrawerVisible.value = false;
+    ElMessage.success("提醒规则已保存");
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : "提醒规则保存失败");
   }
 }
 
@@ -1253,25 +1364,47 @@ function openUserAuthorization(row) {
 }
 
 async function submitUserAuthorization() {
-  if (!userAuthorizationForm.userId) {
-    return;
-  }
   try {
-    const updated = await apiClient.updateUserAuthorization(Number(userAuthorizationForm.userId), {
+    const payload = {
+      username: userAuthorizationForm.username,
       realName: userAuthorizationForm.realName,
       role: userAuthorizationForm.role,
       departmentId: userAuthorizationForm.departmentId,
       classGroupId: userAuthorizationForm.classGroupId,
       status: userAuthorizationForm.status
-    });
-    state.users = state.users.map((item) => (item.id === updated.id ? updated : item));
+    };
+    const updated = userAuthorizationForm.userId
+      ? await apiClient.updateUserAuthorization(Number(userAuthorizationForm.userId), payload)
+      : await apiClient.createUser(payload);
+    state.users = await apiClient.getUsers();
     if (state.currentUser?.id === updated.id) {
       state.currentUser = updated;
     }
     userAuthorizationDrawerVisible.value = false;
-    ElMessage.success("用户角色与班级已更新");
+    ElMessage.success(userAuthorizationForm.userId ? "用户角色与班级已更新" : "学生账号已新增");
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : "用户授权失败");
+    ElMessage.error(error instanceof Error ? error.message : "用户保存失败");
+  }
+}
+
+async function deleteUser(row) {
+  try {
+    await ElMessageBox.confirm(
+      "确认删除该学生账号吗？如果该账号已有反馈记录，系统会自动改为禁用以保留审计链路。",
+      "删除学生",
+      {
+        type: "warning",
+        confirmButtonText: "删除/禁用",
+        cancelButtonText: "取消"
+      }
+    );
+    const result = await apiClient.deleteUser(Number(row.id));
+    state.users = await apiClient.getUsers();
+    ElMessage.success(result.disabled ? String(result.message || "学生账号已禁用") : "学生账号已删除");
+  } catch (error) {
+    if (error !== "cancel") {
+      ElMessage.error(error instanceof Error ? error.message : "删除失败");
+    }
   }
 }
 
@@ -1308,7 +1441,8 @@ async function generateWeeklyTasks() {
       termId: Number(taskGenerateForm.termId),
       weekNo: Number(taskGenerateForm.weekNo),
       deadline: taskGenerateForm.deadline || null,
-      classGroupIds: taskGenerateForm.classGroupIds.map(Number)
+      classGroupIds: taskGenerateForm.classGroupIds.map(Number),
+      feedbackScope: taskGenerateForm.feedbackScope
     });
 
     ElMessage.success("周反馈任务已生成");
@@ -1316,6 +1450,8 @@ async function generateWeeklyTasks() {
     state.weeklyTasks = await apiClient.getWeeklyTasks();
     state.weeklyTaskItems = await apiClient.getWeeklyTaskItems();
     state.weeklyTaskCompliance = await apiClient.getWeeklyTaskCompliance();
+    state.monitorDossiers = await apiClient.getMonitorDossiers();
+    state.syncLogs = await apiClient.getSyncLogs();
     state.summary = await apiClient.getDashboardSummary();
     if (canManageFeedback.value) {
       state.weeklyAnalytics = await apiClient.getWeeklyFeedbackAnalytics();
@@ -1666,6 +1802,21 @@ async function generateAiSummaries() {
   }
 }
 
+async function analyzeSingleFeedback(feedbackType, feedbackId) {
+  try {
+    await apiClient.analyzeFeedback({ feedbackType, feedbackId: Number(feedbackId) });
+    ElMessage.success("AI 分析已完成");
+    state.realtimeFeedbacks = await apiClient.getRealtimeFeedbacks();
+    state.weeklyFeedbacks = await apiClient.getWeeklyFeedbacks();
+    state.feedbackFlags = await apiClient.getFeedbackFlags();
+  } catch (error) {
+    state.realtimeFeedbacks = await apiClient.getRealtimeFeedbacks();
+    state.weeklyFeedbacks = await apiClient.getWeeklyFeedbacks();
+    state.feedbackFlags = await apiClient.getFeedbackFlags();
+    ElMessage.error(error instanceof Error ? error.message : "AI 分析失败");
+  }
+}
+
 function cellText(value) {
   if (value === null || value === undefined) {
     return "";
@@ -1705,6 +1856,8 @@ async function importScheduleExcel(file) {
     state.weeklyTasks = await apiClient.getWeeklyTasks();
     state.weeklyTaskItems = await apiClient.getWeeklyTaskItems();
     state.weeklyTaskCompliance = await apiClient.getWeeklyTaskCompliance();
+    state.monitorDossiers = await apiClient.getMonitorDossiers();
+    state.syncLogs = await apiClient.getSyncLogs();
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : "课表导入失败");
   } finally {
@@ -1850,6 +2003,152 @@ function urgencyType(level) {
     LOW: "info"
   };
   return map[level] || "info";
+}
+
+function aiRiskType(row) {
+  if (row.aiError) {
+    return "warning";
+  }
+  const map = {
+    HIGH: "danger",
+    MEDIUM: "warning",
+    LOW: "success"
+  };
+  return map[row.aiRiskLevel] || "info";
+}
+
+function aiRiskLabel(row) {
+  if (row.aiRiskLevel) {
+    return riskLabel(row.aiRiskLevel);
+  }
+  return row.aiError ? "失败" : "未分析";
+}
+
+function riskLabel(level) {
+  const map = {
+    HIGH: "高",
+    MEDIUM: "中",
+    LOW: "低"
+  };
+  return map[level] || level || "未评估";
+}
+
+function aiQualityLabel(level) {
+  const map = {
+    HIGH: "较高",
+    NORMAL: "正常",
+    LOW: "偏低"
+  };
+  return map[level] || level || "未分析";
+}
+
+function flagTypeLabel(type) {
+  const map = {
+    SENSITIVE_TERM: "敏感词",
+    AI_RISK_LEVEL: "AI风险",
+    AI_QUALITY_LEVEL: "AI质量",
+    AI_CATEGORY: "AI分类",
+    AI_REASON: "AI依据",
+    AI_SUGGESTION: "AI建议",
+    AI_SENSITIVE: "AI敏感判断",
+    AI_ERROR: "AI分析异常"
+  };
+  return map[type] || type || "系统标记";
+}
+
+function syncActionLabel(type) {
+  const map = {
+    TEACHING_TASK_IMPORT: "课表/教学任务导入",
+    WEEKLY_TASK_GENERATE: "周反馈任务生成",
+    ACADEMIC_TIMETABLE_QUERY: "教务课表查询"
+  };
+  return map[type] || type || "系统同步";
+}
+
+function syncStatusLabel(status) {
+  const map = {
+    SUCCESS: "成功",
+    PARTIAL_SUCCESS: "部分成功",
+    FAILED: "失败"
+  };
+  return map[status] || status || "未知";
+}
+
+function syncStatusType(status) {
+  const map = {
+    SUCCESS: "success",
+    PARTIAL_SUCCESS: "warning",
+    FAILED: "danger"
+  };
+  return map[status] || "info";
+}
+
+function weekdayLabel(value) {
+  const map = {
+    1: "周一",
+    2: "周二",
+    3: "周三",
+    4: "周四",
+    5: "周五",
+    6: "周六",
+    7: "周日"
+  };
+  return map[Number(value)] || "-";
+}
+
+function masterDataColumnLabel(resource, column) {
+  const common = {
+    code: "编码",
+    name: "名称",
+    createdAt: "创建时间",
+    updatedAt: "更新时间",
+    status: "状态"
+  };
+  const labels = {
+    departments: {
+      code: "院系编码",
+      name: "院系名称"
+    },
+    majors: {
+      departmentId: "院系编号",
+      departmentName: "院系",
+      code: "专业编码",
+      name: "专业名称"
+    },
+    classes: {
+      majorId: "专业编号",
+      majorName: "专业",
+      gradeYear: "年级",
+      name: "班级名称"
+    },
+    teachers: {
+      departmentId: "院系编号",
+      departmentName: "院系",
+      teacherNo: "教师编号",
+      teacherName: "教师姓名"
+    },
+    courses: {
+      courseCode: "课程编码",
+      courseName: "课程名称",
+      departmentId: "院系编号",
+      departmentName: "院系"
+    },
+    terms: {
+      academicYear: "学年",
+      semester: "学期",
+      startDate: "开始日期",
+      endDate: "结束日期",
+      status: "状态"
+    }
+  };
+  return labels[resource]?.[column] || common[column] || column;
+}
+
+function masterDataCellText(resource, column, value) {
+  if (column === "status") {
+    return value === "ACTIVE" ? "当前/启用" : value === "PLANNED" ? "计划中" : value === "DISABLED" ? "停用" : value || "-";
+  }
+  return value ?? "-";
 }
 
 function urgencyLabel(level) {
@@ -2005,7 +2304,7 @@ onMounted(initializeAuth);
               </p>
             </el-form-item>
             <el-button type="primary" class="full-width" size="large" @click="academicLogin">
-              学校账号登录并查看课表
+              登录
             </el-button>
           </el-form>
         </el-tab-pane>
@@ -2023,18 +2322,11 @@ onMounted(initializeAuth);
               />
             </el-form-item>
             <el-button type="primary" class="full-width" size="large" @click="login">
-              管理员登录
+              登录
             </el-button>
           </el-form>
         </el-tab-pane>
       </el-tabs>
-      <el-alert
-        class="login-tip"
-        title="管理员测试账号：root / admin123，cs_admin / admin123。学校账号密码只用于本次教务认证，不写入数据库。"
-        type="info"
-        :closable="false"
-        show-icon
-      />
     </section>
   </main>
 
@@ -2230,6 +2522,9 @@ onMounted(initializeAuth);
               <div class="card-header">
                 <span>用户与角色</span>
                 <div class="header-actions">
+                  <el-button type="primary" :icon="Plus" @click="openUserCreate">
+                    新增学生
+                  </el-button>
                   <el-upload
                     :auto-upload="false"
                     :show-file-list="false"
@@ -2248,8 +2543,16 @@ onMounted(initializeAuth);
                 </div>
               </div>
             </template>
+            <el-alert
+              v-if="state.users.length === 0"
+              class="section-alert"
+              title="暂无用户数据。可以点击“新增学生”手动创建，也可以导入学生/教师名单。"
+              type="info"
+              :closable="false"
+              show-icon
+            />
             <el-table :data="state.users" stripe border class="user-role-table">
-              <el-table-column prop="id" label="ID" width="80" />
+              <el-table-column prop="id" label="编号" width="80" />
               <el-table-column prop="username" label="账号" min-width="150" show-overflow-tooltip />
               <el-table-column prop="realName" label="姓名" min-width="140" show-overflow-tooltip />
               <el-table-column prop="role" label="角色" width="130">
@@ -2266,10 +2569,19 @@ onMounted(initializeAuth);
                   </el-tag>
                 </template>
               </el-table-column>
-              <el-table-column label="操作" width="120">
+              <el-table-column label="操作" width="170">
                 <template #default="{ row }">
                   <el-button size="small" @click="openUserAuthorization(row)">
                     授权
+                  </el-button>
+                  <el-button
+                    size="small"
+                    type="danger"
+                    plain
+                    :disabled="['SUPER_ADMIN', 'DEPARTMENT_ADMIN'].includes(String(row.role || ''))"
+                    @click="deleteUser(row)"
+                  >
+                    删除
                   </el-button>
                 </template>
               </el-table-column>
@@ -2293,6 +2605,7 @@ onMounted(initializeAuth);
               <el-tab-pane
                 v-for="tab in masterDataTabs"
                 :key="tab.key"
+                :name="tab.key"
                 :label="tab.label"
               >
                 <el-alert
@@ -2303,16 +2616,34 @@ onMounted(initializeAuth);
                   :closable="false"
                   show-icon
                 />
+                <el-empty
+                  v-if="(state.masterData[tab.key] || []).length === 0"
+                  :description="`暂无${tab.label}数据，可以点击右上角新增${tab.label}`"
+                />
                 <el-table :data="state.masterData[tab.key]" border stripe>
-                  <el-table-column prop="id" label="ID" width="80" />
+                  <el-table-column prop="id" label="编号" width="80" />
                   <el-table-column
                     v-for="column in Object.keys(state.masterData[tab.key][0] || {}).filter((key) => key !== 'id')"
                     :key="column"
                     :prop="column"
-                    :label="column"
+                    :label="masterDataColumnLabel(tab.key, column)"
                     min-width="130"
                     show-overflow-tooltip
-                  />
+                  >
+                    <template #default="{ row }">
+                      {{ masterDataCellText(tab.key, column, row[column]) }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="操作" width="150" fixed="right">
+                    <template #default="{ row }">
+                      <el-button size="small" type="primary" plain @click="openMasterDataEdit(row)">
+                        编辑
+                      </el-button>
+                      <el-button size="small" type="danger" plain @click="deleteMasterData(row)">
+                        删除
+                      </el-button>
+                    </template>
+                  </el-table-column>
                 </el-table>
               </el-tab-pane>
             </el-tabs>
@@ -2367,8 +2698,16 @@ onMounted(initializeAuth);
             <el-table :data="state.weeklyTasks" border stripe>
               <el-table-column prop="weekNo" label="周次" width="90" />
               <el-table-column prop="className" label="班级" />
+              <el-table-column prop="feedbackScopeLabel" label="范围" width="110" />
               <el-table-column prop="taskName" label="任务名称" />
               <el-table-column prop="deadline" label="截止时间" />
+              <el-table-column label="提醒" width="110">
+                <template #default="{ row }">
+                  <el-tag :type="row.reminderStatus === 'OVERDUE' ? 'danger' : row.reminderStatus === 'DUE_SOON' ? 'warning' : 'info'">
+                    {{ row.reminderStatus === "OVERDUE" ? "已逾期" : row.reminderStatus === "DUE_SOON" ? "临近截止" : row.reminderStatus === "NO_DEADLINE" ? "未设截止" : "正常" }}
+                  </el-tag>
+                </template>
+              </el-table-column>
               <el-table-column prop="status" label="状态">
                 <template #default="{ row }">
                   <el-tag :type="statusType(row.status)">
@@ -2402,6 +2741,7 @@ onMounted(initializeAuth);
             <el-table :data="courseFeedbackItems" border stripe>
               <el-table-column prop="weekNo" label="周次" width="80" />
               <el-table-column prop="className" label="班级" min-width="160" />
+              <el-table-column prop="feedbackScopeLabel" label="范围" width="110" />
               <el-table-column prop="courseName" label="课程" min-width="200" />
               <el-table-column prop="teacherName" label="教师" min-width="150">
                 <template #default="{ row }">
@@ -2414,6 +2754,13 @@ onMounted(initializeAuth);
                 <template #default="{ row }">
                   <el-tag :type="complianceType(row.itemStatus)">
                     {{ complianceLabel(row.itemStatus) }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="提醒" width="110">
+                <template #default="{ row }">
+                  <el-tag :type="row.reminderStatus === 'OVERDUE' ? 'danger' : row.reminderStatus === 'DUE_SOON' ? 'warning' : row.reminderStatus === 'DONE' ? 'success' : 'info'">
+                    {{ row.reminderStatus === "OVERDUE" ? "已逾期" : row.reminderStatus === "DUE_SOON" ? "临近截止" : row.reminderStatus === "DONE" ? "已完成" : "待提交" }}
                   </el-tag>
                 </template>
               </el-table-column>
@@ -2478,6 +2825,131 @@ onMounted(initializeAuth);
               <el-table-column v-if="canManageFeedback" prop="feedbackWordCount" label="反馈字数" width="110" />
               <el-table-column prop="qualityRemark" label="质量提示" min-width="220" />
             </el-table>
+            <el-empty
+              v-if="state.weeklyTasks.length === 0"
+              description="暂无周反馈任务。请先导入课表任课关系，再点击“生成周任务”。"
+            />
+          </el-card>
+
+          <el-card v-if="canManageFeedback" shadow="never" class="section-card">
+            <template #header>
+              <div class="card-header">
+                <span>学委履职档案</span>
+                <el-tag type="info">{{ state.monitorDossiers.length }} 条</el-tag>
+              </div>
+            </template>
+            <el-alert
+              class="section-alert"
+              title="按学委和班级汇总履职情况，用于奖惩、评优或后续约谈依据；目前先做统计档案，不自动处分。"
+              type="info"
+              :closable="false"
+              show-icon
+            />
+            <el-table :data="state.monitorDossiers" border stripe>
+              <el-table-column prop="departmentName" label="院系" min-width="150" />
+              <el-table-column prop="className" label="班级" min-width="160" />
+              <el-table-column prop="monitorName" label="学委" width="140" />
+              <el-table-column prop="taskCount" label="任务数" width="90" />
+              <el-table-column prop="completionRate" label="完成率" width="100" />
+              <el-table-column prop="missingCourseCount" label="漏交课程" width="100" />
+              <el-table-column prop="overdueCount" label="逾期次数" width="100" />
+              <el-table-column prop="lowQualityCount" label="低质量" width="90" />
+              <el-table-column prop="dossierRemark" label="档案提示" min-width="220" />
+            </el-table>
+            <el-empty
+              v-if="state.monitorDossiers.length === 0"
+              description="暂无学委履职档案。需要先有周任务、班级学委和反馈记录。"
+            />
+          </el-card>
+
+          <el-card v-if="canManageFeedback" shadow="never" class="section-card">
+            <template #header>
+              <div class="card-header">
+                <span>提醒规则</span>
+                <el-button type="primary" plain @click="openReminderRuleDrawer()">
+                  配置规则
+                </el-button>
+              </div>
+            </template>
+            <el-alert
+              class="section-alert"
+              title="当前先配置周反馈截止与质量基础要求；短信、微信等真实推送后续需学校平台支持。"
+              type="warning"
+              :closable="false"
+              show-icon
+            />
+            <el-table :data="state.reminderRules" border stripe>
+              <el-table-column prop="departmentName" label="院系" min-width="150">
+                <template #default="{ row }">
+                  {{ row.departmentName || "全局默认" }}
+                </template>
+              </el-table-column>
+              <el-table-column prop="ruleName" label="规则名称" min-width="180" />
+              <el-table-column prop="dueDayOfWeek" label="截止星期" width="100">
+                <template #default="{ row }">
+                  {{ weekdayLabel(row.dueDayOfWeek) }}
+                </template>
+              </el-table-column>
+              <el-table-column prop="dueTime" label="截止时间" width="100" />
+              <el-table-column prop="remindBeforeHours" label="提前提醒" width="110">
+                <template #default="{ row }">
+                  {{ row.remindBeforeHours }} 小时
+                </template>
+              </el-table-column>
+              <el-table-column prop="minWordCount" label="最低字数" width="100" />
+              <el-table-column prop="status" label="状态" width="100">
+                <template #default="{ row }">
+                  <el-tag :type="row.status === 'ACTIVE' ? 'success' : 'info'">
+                    {{ row.status === "ACTIVE" ? "启用" : "停用" }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" width="90">
+                <template #default="{ row }">
+                  <el-button size="small" @click="openReminderRuleDrawer(row)">编辑</el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+          </el-card>
+
+          <el-card v-if="canManageFeedback" shadow="never" class="section-card">
+            <template #header>
+              <div class="card-header">
+                <span>同步/导入日志</span>
+                <el-tag>{{ state.syncLogs.length }} 条</el-tag>
+              </div>
+            </template>
+            <el-alert
+              class="section-alert"
+              title="记录教务查询、课表导入、周任务生成等关键操作，方便排查为什么课表没读到、导入成功几条。"
+              type="success"
+              :closable="false"
+              show-icon
+            />
+            <el-table :data="state.syncLogs" border stripe>
+              <el-table-column prop="createdAt" label="时间" min-width="170" />
+              <el-table-column prop="operatorName" label="操作人" width="140" />
+              <el-table-column prop="actionType" label="动作" min-width="170">
+                <template #default="{ row }">
+                  {{ syncActionLabel(row.actionType) }}
+                </template>
+              </el-table-column>
+              <el-table-column prop="status" label="状态" width="110">
+                <template #default="{ row }">
+                  <el-tag :type="syncStatusType(row.status)">
+                    {{ syncStatusLabel(row.status) }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column prop="successCount" label="成功" width="80" />
+              <el-table-column prop="failureCount" label="失败" width="80" />
+              <el-table-column prop="message" label="说明" min-width="200" show-overflow-tooltip />
+              <el-table-column prop="detailText" label="详情" min-width="220" show-overflow-tooltip />
+            </el-table>
+            <el-empty
+              v-if="state.syncLogs.length === 0"
+              description="暂无同步/导入日志。导入课表、生成任务或查询教务课表后会自动记录。"
+            />
           </el-card>
         </template>
 
@@ -2571,6 +3043,20 @@ onMounted(initializeAuth);
                   </el-tag>
                 </template>
               </el-table-column>
+              <el-table-column v-if="canManageFeedback" label="AI风险" width="100">
+                <template #default="{ row }">
+                  <el-tag :type="aiRiskType(row)" :title="row.aiError || ''">
+                    {{ aiRiskLabel(row) }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column v-if="canManageFeedback" label="AI质量" width="100">
+                <template #default="{ row }">
+                  {{ aiQualityLabel(row.aiQualityLevel) }}
+                </template>
+              </el-table-column>
+              <el-table-column v-if="canManageFeedback" prop="aiCategory" label="AI分类" width="130" />
+              <el-table-column v-if="canManageFeedback" prop="aiSuggestion" label="AI处理建议" min-width="220" show-overflow-tooltip />
               <el-table-column prop="status" label="状态" width="140">
                 <template #default="{ row }">
                   <el-tag :type="statusType(row.status)">
@@ -2612,6 +3098,14 @@ onMounted(initializeAuth);
                     @click="openReplyDrawer('REALTIME', row.id, row.status)"
                   >
                     处理
+                  </el-button>
+                  <el-button
+                    v-if="canManageFeedback"
+                    size="small"
+                    plain
+                    @click="analyzeSingleFeedback('REALTIME', row.id)"
+                  >
+                    AI分析
                   </el-button>
                   <el-button
                     v-else
@@ -2668,7 +3162,11 @@ onMounted(initializeAuth);
                 </template>
               </el-table-column>
               <el-table-column prop="feedbackId" label="反馈编号" width="100" />
-              <el-table-column prop="flagType" label="标记类型" width="140" />
+              <el-table-column prop="flagType" label="标记类型" width="140">
+                <template #default="{ row }">
+                  {{ flagTypeLabel(row.flagType) }}
+                </template>
+              </el-table-column>
               <el-table-column prop="flagValue" label="命中内容" min-width="180" />
               <el-table-column prop="createdAt" label="标记时间" width="180" />
             </el-table>
@@ -2715,6 +3213,20 @@ onMounted(initializeAuth);
               <el-table-column prop="issueSuggestion" label="问题建议" min-width="180" />
               <el-table-column prop="hardwareIssue" label="硬件问题" min-width="180" />
               <el-table-column prop="remark" label="备注" min-width="140" />
+              <el-table-column v-if="canManageFeedback" label="AI风险" width="100">
+                <template #default="{ row }">
+                  <el-tag :type="aiRiskType(row)" :title="row.aiError || ''">
+                    {{ aiRiskLabel(row) }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column v-if="canManageFeedback" label="AI质量" width="100">
+                <template #default="{ row }">
+                  {{ aiQualityLabel(row.aiQualityLevel) }}
+                </template>
+              </el-table-column>
+              <el-table-column v-if="canManageFeedback" prop="aiCategory" label="AI分类" width="130" />
+              <el-table-column v-if="canManageFeedback" prop="aiSuggestion" label="AI处理建议" min-width="220" show-overflow-tooltip />
               <el-table-column prop="status" label="状态" width="130">
                 <template #default="{ row }">
                   <el-tag :type="statusType(row.status)">
@@ -2727,7 +3239,7 @@ onMounted(initializeAuth);
                   {{ row.latestReplyContent || "暂无处理意见" }}
                 </template>
               </el-table-column>
-              <el-table-column label="操作" width="130" fixed="right">
+              <el-table-column label="操作" width="210" fixed="right">
                 <template #default="{ row }">
                   <el-button
                     v-if="canManageFeedback"
@@ -2737,6 +3249,14 @@ onMounted(initializeAuth);
                     @click="openReplyDrawer('WEEKLY', row.id, row.status)"
                   >
                     处理
+                  </el-button>
+                  <el-button
+                    v-if="canManageFeedback"
+                    size="small"
+                    plain
+                    @click="analyzeSingleFeedback('WEEKLY', row.id)"
+                  >
+                    AI分析
                   </el-button>
                   <el-button
                     v-else
@@ -2773,7 +3293,7 @@ onMounted(initializeAuth);
             </template>
             <el-alert
               class="section-alert"
-              title="当前为本地规则生成的总评：先按课程、教师汇总反馈，并结合敏感词和硬件问题标记风险；后续可替换为真正大模型润色。"
+              title="规则总评会先按课程、教师汇总；点击 AI 生成总评后会保存结果，下次打开统计页仍可查看。"
               type="info"
               :closable="false"
               show-icon
@@ -2800,6 +3320,7 @@ onMounted(initializeAuth);
                   {{ Array.isArray(row.aiSuggestions) ? row.aiSuggestions.join("；") : row.aiError || "未生成" }}
                 </template>
               </el-table-column>
+              <el-table-column prop="aiGeneratedAt" label="AI生成时间" min-width="170" />
             </el-table>
           </el-card>
 
@@ -2864,7 +3385,7 @@ onMounted(initializeAuth);
         <el-form-item label="紧急程度">
           <el-segmented
             v-model="realtimeForm.urgencyLevel"
-            :options="['LOW', 'MEDIUM', 'HIGH']"
+            :options="urgencyOptions"
           />
         </el-form-item>
         <el-form-item label="标题">
@@ -2898,7 +3419,7 @@ onMounted(initializeAuth);
 
     <el-drawer
       v-model="masterDataDrawerVisible"
-      :title="`新增${activeMasterTab?.label || '基础数据'}`"
+      :title="`${masterDataEditingId ? '编辑' : '新增'}${activeMasterTab?.label || '基础数据'}`"
       size="420px"
     >
       <el-form label-position="top">
@@ -2928,6 +3449,58 @@ onMounted(initializeAuth);
         </el-form-item>
         <el-button type="primary" class="full-width" @click="submitMasterData">
           保存
+        </el-button>
+      </el-form>
+    </el-drawer>
+
+    <el-drawer v-model="reminderRuleDrawerVisible" title="提醒规则配置" size="420px">
+      <el-form label-position="top">
+        <el-form-item label="规则名称">
+          <el-input v-model="reminderRuleForm.ruleName" />
+        </el-form-item>
+        <el-form-item label="归属院系 ID">
+          <el-input-number v-model="reminderRuleForm.departmentId" class="full-width" :min="1" />
+        </el-form-item>
+        <el-form-item label="截止星期">
+          <el-select v-model="reminderRuleForm.dueDayOfWeek" class="full-width">
+            <el-option label="周一" :value="1" />
+            <el-option label="周二" :value="2" />
+            <el-option label="周三" :value="3" />
+            <el-option label="周四" :value="4" />
+            <el-option label="周五" :value="5" />
+            <el-option label="周六" :value="6" />
+            <el-option label="周日" :value="7" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="截止时间">
+          <el-time-picker
+            v-model="reminderRuleForm.dueTime"
+            value-format="HH:mm"
+            format="HH:mm"
+            class="full-width"
+          />
+        </el-form-item>
+        <el-form-item label="提前提醒小时数">
+          <el-input-number v-model="reminderRuleForm.remindBeforeHours" class="full-width" :min="1" />
+        </el-form-item>
+        <el-form-item label="反馈最低字数">
+          <el-input-number v-model="reminderRuleForm.minWordCount" class="full-width" :min="1" />
+        </el-form-item>
+        <el-form-item label="状态">
+          <el-select v-model="reminderRuleForm.status" class="full-width">
+            <el-option label="启用" value="ACTIVE" />
+            <el-option label="停用" value="DISABLED" />
+          </el-select>
+        </el-form-item>
+        <el-alert
+          class="section-alert"
+          title="当前规则用于管理端展示和质量判断参数沉淀，真实推送需要后续对接学校消息平台。"
+          type="info"
+          :closable="false"
+          show-icon
+        />
+        <el-button type="primary" class="full-width" @click="submitReminderRule">
+          保存规则
         </el-button>
       </el-form>
     </el-drawer>
@@ -2972,6 +3545,16 @@ onMounted(initializeAuth);
         <el-form-item label="周次">
           <el-input-number v-model="taskGenerateForm.weekNo" class="full-width" :min="1" />
         </el-form-item>
+        <el-form-item label="反馈范围">
+          <el-segmented
+            v-model="taskGenerateForm.feedbackScope"
+            :options="[
+              { label: '自动规则', value: 'AUTO' },
+              { label: '外教课程', value: 'FOREIGN_ONLY' },
+              { label: '全部课程', value: 'ALL_COURSES' }
+            ]"
+          />
+        </el-form-item>
         <el-form-item label="截止时间">
           <el-date-picker
             v-model="taskGenerateForm.deadline"
@@ -3000,7 +3583,7 @@ onMounted(initializeAuth);
           </el-select>
         </el-form-item>
         <el-alert
-          title="当前生成的是周反馈任务；班级留空会给全部班级生成，选择班级则只生成所选班级。"
+          title="自动规则会按老师要求处理：单周生成外教课程反馈任务，双周生成全部课程反馈任务。"
           type="warning"
           :closable="false"
           show-icon
@@ -3103,7 +3686,11 @@ onMounted(initializeAuth);
     <el-drawer v-model="userAuthorizationDrawerVisible" title="用户角色与班级授权" size="460px">
       <el-form label-position="top">
         <el-form-item label="学校账号">
-          <el-input v-model="userAuthorizationForm.username" disabled />
+          <el-input
+            v-model="userAuthorizationForm.username"
+            :disabled="Boolean(userAuthorizationForm.userId)"
+            placeholder="请输入学号/学校账号"
+          />
         </el-form-item>
         <el-form-item label="姓名">
           <el-input v-model="userAuthorizationForm.realName" />
@@ -3175,7 +3762,7 @@ onMounted(initializeAuth);
         </el-form-item>
         <el-alert
           class="section-alert"
-          title="学委仍然使用学校账号登录；这里仅给已实名认证的学生账号增加本地角色和班级授权。"
+          :title="userAuthorizationForm.userId ? '学委仍然使用学校账号登录；这里仅给已实名认证的学生账号增加本地角色和班级授权。' : '手动新增学生只创建本系统用户与角色档案；学生后续仍使用学校账号登录，密码不在本系统维护。'"
           type="info"
           :closable="false"
           show-icon
@@ -3189,7 +3776,7 @@ onMounted(initializeAuth);
     <el-drawer v-model="replyDrawerVisible" title="反馈处理" size="460px">
       <el-form label-position="top">
         <el-form-item label="反馈类型">
-          <el-input v-model="replyForm.feedbackType" disabled />
+          <el-input :model-value="feedbackTypeLabel(replyForm.feedbackType)" disabled />
         </el-form-item>
         <el-form-item label="反馈编号">
           <el-input-number v-model="replyForm.feedbackId" class="full-width" disabled />

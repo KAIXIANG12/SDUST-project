@@ -5,7 +5,9 @@ spring:
   application:
     name: student-feedback-backend
   config:
-    import: optional:file:./application-local.yml
+    import:
+      - optional:file:./application-local.yml
+      - optional:file:./backend-spring/application-local.yml
   datasource:
     url: ${DB_URL:jdbc:mysql://localhost:3306/student_feedback_system?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false}
     username: ${DB_USERNAME:root}

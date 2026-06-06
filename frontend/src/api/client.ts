@@ -22,9 +22,12 @@ import type {
   LoginResponse,
   MasterRecord,
   MasterResource,
+  MonitorDossier,
   MyTimetableResponse,
   RealtimeFeedback,
+  ReminderRule,
   ReplyFeedbackRequest,
+  SyncLog,
   SyncPersonalTimetableRequest,
   SyncPersonalTimetableResponse,
   WeeklyFeedback,
@@ -97,10 +100,21 @@ export const apiClient = {
   getUsers() {
     return request<CurrentUser[]>("/users");
   },
+  createUser(payload: Record<string, unknown>) {
+    return request<CurrentUser>("/users", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  },
   updateUserAuthorization(id: number, payload: Record<string, unknown>) {
     return request<CurrentUser>(`/users/${id}/authorization`, {
       method: "PATCH",
       body: JSON.stringify(payload)
+    });
+  },
+  deleteUser(id: number) {
+    return request<Record<string, unknown>>(`/users/${id}`, {
+      method: "DELETE"
     });
   },
   importUsers(payload: { rows: Record<string, unknown>[] }) {
@@ -117,6 +131,32 @@ export const apiClient = {
       method: "POST",
       body: JSON.stringify(payload)
     });
+  },
+  updateMasterData(resource: MasterResource, id: number, payload: Record<string, unknown>) {
+    return request<MasterRecord>(`/master-data/${resource}/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    });
+  },
+  deleteMasterData(resource: MasterResource, id: number) {
+    return request<{ id: number; deleted: boolean }>(`/master-data/${resource}/${id}`, {
+      method: "DELETE"
+    });
+  },
+  getSyncLogs() {
+    return request<SyncLog[]>("/operations/sync-logs");
+  },
+  getReminderRules() {
+    return request<ReminderRule[]>("/operations/reminder-rules");
+  },
+  saveReminderRule(payload: ReminderRule) {
+    return request<ReminderRule>("/operations/reminder-rules", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  },
+  getMonitorDossiers() {
+    return request<MonitorDossier[]>("/schedules/class-representative-dossiers");
   },
   getWeeklyTasks() {
     return request<WeeklyTask[]>("/schedules/weekly-tasks");
@@ -215,6 +255,12 @@ export const apiClient = {
   updateFeedbackStatus(payload: Pick<ReplyFeedbackRequest, "feedbackType" | "feedbackId" | "status">) {
     return request<ReplyFeedbackRequest & { status: string }>("/feedbacks/status", {
       method: "PATCH",
+      body: JSON.stringify(payload)
+    });
+  },
+  analyzeFeedback(payload: Pick<ReplyFeedbackRequest, "feedbackType" | "feedbackId">) {
+    return request<Record<string, unknown>>("/feedbacks/ai-analysis", {
+      method: "POST",
       body: JSON.stringify(payload)
     });
   },
