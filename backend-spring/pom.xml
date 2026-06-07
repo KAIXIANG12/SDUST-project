@@ -15,7 +15,7 @@
   <artifactId>student-feedback-backend</artifactId>
   <version>0.1.0</version>
   <name>student-feedback-backend</name>
-  <description>山东科技大学济南校区教学反馈管理系统 Spring Boot 后端</description>
+  <description>山东科技大学济南校区教学质量信息反馈系统 Spring Boot 后端</description>
 
   <properties>
     <java.version>11</java.version>

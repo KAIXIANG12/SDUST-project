@@ -1661,7 +1661,7 @@ async function exportWeeklyFeedbackTable() {
   };
 
   const studentWorkbook = new ExcelJS.Workbook();
-  studentWorkbook.creator = "教学反馈管理系统";
+  studentWorkbook.creator = "教学质量信息反馈系统";
   studentWorkbook.created = new Date();
   const worksheet = studentWorkbook.addWorksheet("Sheet2");
 
@@ -1685,7 +1685,7 @@ async function exportWeeklyFeedbackTable() {
   styleTemplateSheet(worksheet, studentWidths, 11);
 
   const teacherWorkbook = new ExcelJS.Workbook();
-  teacherWorkbook.creator = "教学反馈管理系统";
+  teacherWorkbook.creator = "教学质量信息反馈系统";
   teacherWorkbook.created = new Date();
   const teacherSheet = teacherWorkbook.addWorksheet("Sheet2");
   teacherSheet.addRow(teacherHeaders);
@@ -2229,7 +2229,7 @@ onMounted(initializeAuth);
           <img src="/images/sdust-logo.png" alt="山东科技大学校徽" />
         </div>
         <div>
-          <h1>教学反馈管理系统</h1>
+          <h1>教学质量信息反馈系统</h1>
         </div>
       </div>
       <h2>正在检查登录状态</h2>
@@ -2244,7 +2244,7 @@ onMounted(initializeAuth);
           <img src="/images/sdust-logo.png" alt="山东科技大学校徽" />
         </div>
         <div>
-          <h1>教学反馈管理系统</h1>
+          <h1>教学质量信息反馈系统</h1>
         </div>
       </div>
       <h2>登录系统</h2>
@@ -2337,7 +2337,7 @@ onMounted(initializeAuth);
           <img src="/images/sdust-logo.png" alt="山东科技大学校徽" />
         </div>
         <div>
-          <h1>教学反馈管理系统</h1>
+          <h1>教学质量信息反馈系统</h1>
         </div>
       </section>
 
